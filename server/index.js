@@ -144,17 +144,29 @@ function resolveChat(user, body){
     student:clientStudent(hit), avg: hit ? hit.avg : null };
 }
 
-/* يمنع تفعيل أداة بصرية بلا بيانات تسندها (سبب «الرسم أدناه» ولا يظهر) */
+/* كشف نيّة الطلب من نصّ السائل — يجبر الأداة حتى لو لم يُصدر النموذج الرمز */
+function intentFlags(msg){
+  const t = String(msg||'');
+  return {
+    chart:  /رسم|بياني|بيان|مخطط|رسمه|رسمة|chart|graph|قارن|مقارنة/i.test(t),
+    donut:  /حضور|غياب|مواظبة|دوام|attendance/i.test(t),
+    report: /تقرير|كشف\s*كامل|كشف\s*شامل|report/i.test(t),
+    top:    /أفضل|افضل|أعلى|اعلى|ترتيب|متفوق|أوائل|اوائل/i.test(t),
+  };
+}
+
+/* يمنع تفعيل أداة بصرية بلا بيانات تسندها + يجبرها عند طلب السائل صراحةً */
 function buildDone(full, ctx){
   const f = llm.toolFlags(full);
+  const w = intentFlags(ctx.message);
   const hasGrades = !!(ctx.student && ctx.student.grades && Object.keys(ctx.student.grades).length);
   const st = roster.stats();
   const out = {
     text: llm.stripTools(full),
-    chart: f.chart && hasGrades,
-    donut: f.donut && !!(ctx.student && ctx.student.attendance),
-    report: f.report && hasGrades,
-    top: f.top && !!(st && st.أعلى_10 && st.أعلى_10.length),
+    chart: (f.chart || w.chart) && hasGrades,
+    donut: (f.donut || w.donut) && !!(ctx.student && ctx.student.attendance),
+    report: (f.report || w.report) && hasGrades,
+    top: (f.top || w.top) && !!(st && st.أعلى_10 && st.أعلى_10.length),
     student: ctx.student, avg: ctx.avg,
   };
   if(out.top) out.topData = st.أعلى_10;
@@ -171,6 +183,11 @@ app.post('/api/chat', auth, async (req,res)=>{
   try {
     const out = await llm.chat(ctx.system, hist);
     hist.push({ role:'assistant', content: out.text }); trimHist(hist);
+    const w = intentFlags(ctx.message);
+    const hasGrades = !!(ctx.student && ctx.student.grades && Object.keys(ctx.student.grades).length);
+    out.chart  = (out.chart  || w.chart)  && hasGrades;
+    out.donut  = (out.donut  || w.donut)  && !!(ctx.student && ctx.student.attendance);
+    out.report = (out.report || w.report) && hasGrades;
     res.json({ ...out, student:ctx.student, avg:ctx.avg, source:'ai' });
   } catch(e){
     hist.pop();
