@@ -34,7 +34,9 @@ const server = http.createServer(app);
 const io = new Server(server, { cors:{ origin:'*' } });
 
 app.use(express.json({ limit:'2mb' }));
-app.use(express.static(path.join(__dirname, '..', 'public')));
+app.use(express.static(path.join(__dirname, '..', 'public'), {
+  setHeaders: (res, p) => { if(p.endsWith('.html')) res.setHeader('Cache-Control', 'no-cache'); },
+}));
 
 /* رفع الملفات (يُعرَّف مبكراً لأن عدة مسارات تستخدمه) */
 const storage = multer.diskStorage({
@@ -44,7 +46,7 @@ const storage = multer.diskStorage({
 const upload = multer({ storage, limits:{ fileSize:10*1024*1024 } });
 
 /* ---------- المصادقة ---------- */
-function newToken(uid){ const t = crypto.randomBytes(24).toString('hex'); db.DB.tokens[t] = uid; saveDB(); return t; }
+function newToken(uid){ const t = crypto.randomBytes(24).toString('hex'); db.DB.tokens[t] = uid; db.saveNow(); return t; }
 function userFromToken(t){ const uid = t && db.DB.tokens[t]; return uid ? db.DB.users.find(u=>u.id===uid) : null; }
 function auth(req,res,next){
   const h = req.headers.authorization || '';
@@ -174,6 +176,46 @@ function buildDone(full, ctx){
   return out;
 }
 
+/* حفظ دورة محادثة في سجل وليّ الأمر + توليد عنوان AI للمحادثة الجديدة */
+function saveConvoTurn(user, convoId, sid, userText, botOut){
+  if(user.role !== 'parent') return {};
+  const list = db.DB.convos[user.id] = db.DB.convos[user.id] || [];
+  let convo = convoId && list.find(c=>c.id===convoId);
+  let isNew = false;
+  if(!convo){
+    convo = { id:'c'+Date.now().toString(36)+Math.random().toString(16).slice(2,5),
+      sid, title:String(userText).slice(0,32), msgs:[], upd:Date.now() };
+    list.unshift(convo); isNew = true;
+  }
+  if(sid) convo.sid = sid;
+  convo.msgs.push({ role:'user', text:userText });
+  convo.msgs.push({ role:'bot', text:botOut.text||'', chart:!!botOut.chart, donut:!!botOut.donut,
+    report:!!botOut.report, top:!!botOut.top, topData:botOut.topData||null, student:botOut.student||null, avg:botOut.avg });
+  if(convo.msgs.length > 80) convo.msgs.splice(0, convo.msgs.length - 80);
+  convo.upd = Date.now();
+  if(list.length > 40) list.length = 40;
+  saveDB();
+  if(isNew) llm.titleFor(userText).then(t=>{ if(t){ convo.title = t; saveDB(); } }).catch(()=>{});
+  return { convoId: convo.id, title: convo.title, isNew };
+}
+
+/* ---- محادثات وليّ الأمر المحفوظة ---- */
+app.get('/api/convos', auth, requireRole('parent'), (req,res)=>{
+  const list = (db.DB.convos[req.user.id] || []).slice()
+    .sort((a,b)=> b.upd - a.upd)
+    .map(c=>({ id:c.id, title:c.title, sid:c.sid, upd:c.upd, count:c.msgs.length }));
+  res.json({ convos:list });
+});
+app.get('/api/convos/:id', auth, requireRole('parent'), (req,res)=>{
+  const c = (db.DB.convos[req.user.id] || []).find(x=>x.id===req.params.id);
+  if(!c) return res.status(404).json({ error:'غير موجودة' });
+  res.json({ convo:c });
+});
+app.delete('/api/convos/:id', auth, requireRole('parent'), (req,res)=>{
+  db.DB.convos[req.user.id] = (db.DB.convos[req.user.id] || []).filter(x=>x.id!==req.params.id);
+  saveDB(); res.json({ ok:true });
+});
+
 app.post('/api/chat', auth, async (req,res)=>{
   const ctx = resolveChat(req.user, req.body);
   if(ctx.error) return res.status(404).json({ error:ctx.error });
@@ -188,7 +230,9 @@ app.post('/api/chat', auth, async (req,res)=>{
     out.chart  = (out.chart  || w.chart)  && hasGrades;
     out.donut  = (out.donut  || w.donut)  && !!(ctx.student && ctx.student.attendance);
     out.report = (out.report || w.report) && hasGrades;
-    res.json({ ...out, student:ctx.student, avg:ctx.avg, source:'ai' });
+    const cv = saveConvoTurn(req.user, req.body.convoId, req.body.studentId, ctx.message,
+      { ...out, student:ctx.student, avg:ctx.avg });
+    res.json({ ...out, student:ctx.student, avg:ctx.avg, convoId:cv.convoId, convoTitle:cv.title, source:'ai' });
   } catch(e){
     hist.pop();
     res.json({ text:'', fallback:true, error:String(e.message||e), student:ctx.student, avg:ctx.avg, source:'local' });
@@ -217,7 +261,10 @@ app.post('/api/chat/stream', auth, async (req,res)=>{
       d => { if(!closed) send('token', { d }); },
       () => { if(!closed && (++thinkN % 8 === 0)) send('think', { n:thinkN }); });
     hist.push({ role:'assistant', content: llm.stripTools(full) }); trimHist(hist);
-    send('done', buildDone(full, ctx));
+    const out = buildDone(full, ctx);
+    const cv = saveConvoTurn(req.user, req.body.convoId, req.body.studentId, ctx.message, out);
+    out.convoId = cv.convoId; out.convoTitle = cv.title;
+    send('done', out);
   }catch(e){
     hist.pop();
     send('error', { error:String(e.message||e), student:ctx.student, avg:ctx.avg });
@@ -420,7 +467,7 @@ app.post('/api/messages/clear', auth, requireRole('admin'), (req,res)=>{
 app.post('/api/reset', auth, requireRole('admin'), (req,res)=>{ resetDB(); res.json({ ok:true }); });
 
 /* SPA fallback */
-app.get('*', (req,res)=> res.sendFile(path.join(__dirname,'..','public','index.html')));
+app.get('*', (req,res)=>{ res.setHeader('Cache-Control','no-cache'); res.sendFile(path.join(__dirname,'..','public','index.html')); });
 
 /* ============================================================
    SOCKET.IO — realtime chat + calls signaling

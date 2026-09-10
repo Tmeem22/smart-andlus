@@ -205,4 +205,23 @@ async function chat(systemPrompt, history){
   return { text: stripTools(out), ...toolFlags(out) };
 }
 
-module.exports = { MEM_TURNS, MEM_MSGS, chat, askLLM, streamLLM, buildMessages, promptForParent, promptForSchool, toolFlags, stripTools, MODEL };
+/* عنوان قصير للمحادثة من أول سؤال (اختيار الذكاء الاصطناعي) */
+async function titleFor(question){
+  try{
+    const key = process.env.FIREWORKS_API_KEY; if(!key) return '';
+    const res = await fetch(API_URL, {
+      method:'POST',
+      headers:{ 'Content-Type':'application/json', 'Authorization':'Bearer '+key },
+      body: JSON.stringify({ model:MODEL, max_tokens:400, temperature:0.3, reasoning_effort:'low', messages:[
+        { role:'system', content:'أعطِ عنواناً عربياً قصيراً جداً (٢-٤ كلمات) يلخّص موضوع سؤال وليّ الأمر. أعد العنوان فقط بلا علامات اقتباس أو ترقيم أو شرح.' },
+        { role:'user', content:String(question).slice(0,300) },
+      ]}),
+    });
+    if(!res.ok) return '';
+    const j = await res.json();
+    let t = (j.choices && j.choices[0] && j.choices[0].message && j.choices[0].message.content) || '';
+    return t.replace(/["'«»`.\n\r]/g,' ').replace(/\s+/g,' ').trim().slice(0, 40);
+  }catch(e){ return ''; }
+}
+
+module.exports = { MEM_TURNS, MEM_MSGS, chat, askLLM, streamLLM, buildMessages, promptForParent, promptForSchool, toolFlags, stripTools, titleFor, MODEL };

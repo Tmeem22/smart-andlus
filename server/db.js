@@ -37,6 +37,7 @@ function seed(){
     files: [],
     threads: {},   // "idA|idB" (مرتّبة) -> [{ from, text, ts }]
     notifs: {},    // userId -> [{ id, text, sub, ts, read }]
+    convos: {},    // userId -> [{ id, sid, title, msgs:[...], upd }]  (محادثات AI محفوظة)
     tokens: {},    // token -> userId
   };
 }

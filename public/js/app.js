@@ -271,6 +271,29 @@ function connectSocket(){
 /* ============================================================
    PARENT — chat
    ============================================================ */
+let CONVOS = [], activeConvo = null;
+
+/* بناء الأدوات البصرية من نتيجة (حيّة أو محفوظة) */
+function toolsHtml(r){
+  const s = r.student; let extra = '';
+  if(s && r.chart && s.grades && Object.keys(s.grades).length)
+    extra += barChart(s.grades, `درجات الطالب ${s.name}`, `${s.grade||''} ${s.classNo?'· '+s.classNo:''}`);
+  if(s && r.donut && s.attendance) extra += donut(s.attendance, 'المواظبة', `حضور الطالب ${s.name}`, s.name+(s.classNo?' — '+s.classNo:''));
+  if(s && r.report && s.grades && Object.keys(s.grades).length) extra += repCardBox(s, r.avg != null ? r.avg : 0);
+  if(r.top && r.topData) extra += topChart(r.topData);
+  return extra;
+}
+function greetingChips(){
+  const st = el('stream');
+  const wrap = document.createElement('div'); wrap.className = 'suggest';
+  ['📊 رسم بياني للدرجات','📄 تقرير كامل','✅ نسبة الحضور','⭐ أفضل وأضعف مادة'].forEach(txt=>{
+    const b = document.createElement('button'); b.textContent = txt;
+    b.onclick = () => { el('chatIn').value = txt.replace(/^[^ ]+ /,''); sendChat(); };
+    wrap.appendChild(b);
+  });
+  st.appendChild(wrap); st.scrollTop = st.scrollHeight;
+}
+
 async function renderChat(v){
   const school = ME.role !== 'parent';
   let children = [], cur = null, rst = null;
@@ -282,50 +305,107 @@ async function renderChat(v){
     activeChild = activeChild && children.some(c=>c.id===activeChild) ? activeChild : children[0].id;
     cur = children.find(c=>c.id===activeChild);
   }
+  const rightCtrl = school
+    ? `<span class="chip">${rst.ready ? '🧠 محفوظ: '+rst.count+' طالب' : '⚠️ لم يُستورد سجل بعد'}</span>`
+    : `<div class="field" style="margin:0"><select id="childSel" style="min-width:170px">
+        ${children.map(k=>`<option value="${k.id}" ${k.id===activeChild?'selected':''}>${esc(k.name)} — ${esc(k.classNo)}</option>`).join('')}
+       </select></div>`;
   v.innerHTML = `
-    <div class="chat-wrap">
-      <div class="flex between center mb wrap gap">
-        <div>
-          <h2 style="margin:0;font-size:20px">المساعد الذكي 🤖</h2>
-          <p class="muted small" style="margin:2px 0 0">${school
-            ? 'اسأل عن أي طالب في السجل المفهرس — الإجابة فورية من الذاكرة'
-            : 'اسأل عن مستوى ابنك، الدرجات، الحضور — واطلب رسم بياني أو تقرير كامل'}</p>
+    <div class="ai-layout ${school?'no-side':''}">
+      ${school ? '' : `<aside class="convo-side" id="convoSide">
+        <button class="btn block" id="newChatBtn">＋ محادثة جديدة</button>
+        <div class="convo-list" id="convoList"></div>
+      </aside>
+      <div class="convo-scrim" id="convoScrim"></div>`}
+      <div class="chat-wrap">
+        <div class="flex between center mb wrap gap">
+          <div class="flex center gap">
+            ${school ? '' : `<button class="icon-btn convo-btn" id="convoToggle" title="المحادثات"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M3 6h18M3 12h18M3 18h18"/></svg></button>`}
+            <div><h2 style="margin:0;font-size:19px">المساعد الذكي 🤖</h2>
+              <p class="muted small" style="margin:2px 0 0">${school?'اسأل عن أي طالب في السجل':'اسأل عن مستوى ابنك واطلب رسم أو تقرير'}</p></div>
+          </div>
+          ${rightCtrl}
         </div>
-        ${school
-          ? `<span class="chip">${rst.ready ? '🧠 محفوظ: '+rst.count+' طالب' : '⚠️ لم يُستورد سجل بعد'}</span>`
-          : `<div class="field" style="margin:0"><select id="childSel" style="min-width:180px">
-              ${children.map(k=>`<option value="${k.id}" ${k.id===activeChild?'selected':''}>${esc(k.name)} — ${esc(k.classNo)}</option>`).join('')}
-             </select></div>`}
-      </div>
-      <div class="chat-stream" id="stream"></div>
-      <div class="composer">
-        <input id="chatIn" placeholder="${school?'اكتب سؤالك... مثال: كم عدد الطلاب المتفوقين؟':'اكتب سؤالك... مثال: أعطني رسم بياني لدرجات ابني'}" autocomplete="off">
-        <button class="send-btn" id="sendBtn">${I.send}</button>
+        <div class="chat-stream" id="stream"></div>
+        <div class="composer">
+          <input id="chatIn" placeholder="${school?'مثال: كم عدد الطلاب المتفوقين؟':'مثال: أعطني رسم بياني لدرجات ابني'}" autocomplete="off">
+          <button class="send-btn" id="sendBtn">${I.send}</button>
+        </div>
       </div>
     </div>`;
-  if(!school){ activeChild = activeChild; el('childSel').onchange = e => { activeChild = e.target.value; renderChat(v); }; }
-  else activeChild = null;
   el('sendBtn').onclick = sendChat;
   el('chatIn').addEventListener('keydown', e => { if(e.key === 'Enter') sendChat(); });
-  const st = el('stream'); st.innerHTML = '';
 
-  let chips;
   if(school){
+    activeChild = null; activeConvo = null;
+    const st = el('stream'); st.innerHTML = '';
     botSay(rst.ready
-      ? `أهلاً 👋 حفظت سجل <b>${rst.count} طالب</b> من الملف «${esc(rst.fileName||'')}» — قرأته مرّة واحدة وقت الاستيراد. اسألني عن أي طالب أو إحصائية وسأجيب فوراً.`
-      : `أهلاً 👋 لم يُستورد سجل الطلاب بعد. افتح <b>سجل الطلاب</b> واستورد ملف الإكسل، وسأحفظه في ذاكرتي.`);
-    chips = ['👥 كم عدد الطلاب؟','🏆 أفضل 10 طلاب','📊 متوسط كل مادة','🔎 درجات الطالب ST1001'];
-  } else {
-    botSay(`أهلاً بك 👋 أنا مساعد <b>ذكاء الأندلس</b>. أستطيع إعطاءك معلومات <b>${esc(cur.name)}</b>: الدرجات، الحضور، المستوى، أو تقرير كامل. كيف أساعدك؟`);
-    chips = ['📊 رسم بياني للدرجات','📄 تقرير كامل','✅ نسبة الحضور','⭐ أفضل وأضعف مادة'];
+      ? `أهلاً 👋 حفظت سجل <b>${rst.count} طالب</b> — اسألني عن أي طالب أو إحصائية وأجيب فوراً.`
+      : `أهلاً 👋 لم يُستورد سجل الطلاب بعد. افتح <b>سجل الطلاب</b> واستورد ملف الإكسل.`);
+    const w = document.createElement('div'); w.className='suggest';
+    ['👥 كم عدد الطلاب؟','🏆 أفضل 10 طلاب','📊 متوسط كل مادة'].forEach(t=>{ const b=document.createElement('button');b.textContent=t;b.onclick=()=>{el('chatIn').value=t.replace(/^[^ ]+ /,'');sendChat();};w.appendChild(b); });
+    st.appendChild(w); return;
   }
-  const wrap = document.createElement('div'); wrap.className = 'suggest';
-  chips.forEach(txt=>{
-    const b = document.createElement('button'); b.textContent = txt;
-    b.onclick = () => { el('chatIn').value = txt.replace(/^[^ ]+ /,''); sendChat(); };
-    wrap.appendChild(b);
-  });
-  st.appendChild(wrap); st.scrollTop = st.scrollHeight;
+
+  // وليّ الأمر: قائمة المحادثات + استئناف
+  el('childSel').onchange = e => { activeChild = e.target.value; newChat(); };
+  el('newChatBtn').onclick = () => newChat();
+  el('convoToggle').onclick = () => { el('convoSide').classList.toggle('open'); el('convoScrim').classList.toggle('show'); };
+  el('convoScrim').onclick = () => { el('convoSide').classList.remove('open'); el('convoScrim').classList.remove('show'); };
+  await loadConvos();
+  if(activeConvo && CONVOS.some(c=>c.id===activeConvo)) await openConvo(activeConvo);
+  else newChat();
+}
+
+async function loadConvos(){
+  try{ const { convos } = await api('/api/convos'); CONVOS = convos || []; }catch(e){ CONVOS = []; }
+  renderConvoList();
+}
+function renderConvoList(){
+  const box = el('convoList'); if(!box) return;
+  if(!CONVOS.length){ box.innerHTML = `<div class="small muted" style="padding:12px;text-align:center">لا محادثات محفوظة بعد</div>`; return; }
+  box.innerHTML = CONVOS.map(c=>`
+    <div class="convo-item ${c.id===activeConvo?'active':''}" onclick="openConvo('${c.id}')">
+      <span class="ci-title">${esc(c.title||'محادثة')}</span>
+      <span class="ci-time">${timeAgo(c.upd)}</span>
+      <button class="ci-del" title="حذف" onclick="event.stopPropagation();delConvo('${c.id}')">✕</button>
+    </div>`).join('');
+}
+function newChat(){
+  activeConvo = null;
+  const st = el('stream'); if(!st) return; st.innerHTML = '';
+  const cur = (document.getElementById('childSel')||{}).selectedOptions ? document.getElementById('childSel').selectedOptions[0].textContent : '';
+  botSay(`أهلاً بك 👋 أنا مساعد <b>ذكاء الأندلس</b>. اسألني عن <b>${esc((cur||'').split('—')[0].trim())}</b>: الدرجات، الحضور، أو اطلب رسم/تقرير.`);
+  greetingChips();
+  renderConvoList();
+  el('convoSide') && el('convoSide').classList.remove('open');
+  el('convoScrim') && el('convoScrim').classList.remove('show');
+}
+async function openConvo(id){
+  let convo;
+  try{ ({ convo } = await api('/api/convos/'+id)); }catch(e){ toast('تعذّر فتح المحادثة'); return; }
+  activeConvo = id;
+  if(convo.sid) activeChild = convo.sid;
+  const sel = el('childSel'); if(sel && convo.sid) sel.value = convo.sid;
+  const st = el('stream'); st.innerHTML = '';
+  convo.msgs.forEach(m=>{ if(m.role==='user') meSay(m.text); else botSay(fmt(m.text||'') + toolsHtml(m)); });
+  renderConvoList();
+  el('convoSide') && el('convoSide').classList.remove('open');
+  el('convoScrim') && el('convoScrim').classList.remove('show');
+  st.scrollTop = st.scrollHeight;
+}
+function afterConvo(r){
+  if(!r || !r.convoId || ME.role !== 'parent') return;
+  const isNew = activeConvo !== r.convoId;
+  activeConvo = r.convoId;
+  loadConvos();                          // حدّث القائمة فوراً
+  if(isNew) setTimeout(loadConvos, 3500); // التقط عنوان الـAI المولّد لاحقاً
+}
+async function delConvo(id){
+  if(!confirm('حذف هذه المحادثة؟')) return;
+  try{ await api('/api/convos/'+id, { method:'DELETE' }); }catch(e){}
+  CONVOS = CONVOS.filter(c=>c.id!==id);
+  if(activeConvo===id){ activeConvo=null; newChat(); } else renderConvoList();
 }
 
 /* ============================================================
@@ -423,7 +503,7 @@ async function sendChat(){
     const res = await fetch('/api/chat/stream', {
       method:'POST',
       headers:{ 'Content-Type':'application/json', 'Authorization':'Bearer '+TOKEN },
-      body: JSON.stringify({ studentId:activeChild, message:q }),
+      body: JSON.stringify({ studentId:activeChild, message:q, convoId:activeConvo }),
     });
     if(!res.ok || !res.body) throw new Error('HTTP '+res.status);
     const reader = res.body.getReader(); const dec = new TextDecoder(); let buf = '';
@@ -461,12 +541,13 @@ async function sendChat(){
     if(r.report && s && s.grades && Object.keys(s.grades).length) extra += repCardBox(s, avg != null ? avg : 0);
     if(r.top && r.topData) extra += topChart(r.topData);
     fill(b, fmt(r.text || cleanLive(full)) + extra);
+    afterConvo(r);
   };
   if(final){ renderResult(final); return; }
 
   // احتياط: طلب غير متدفّق — يعمل على متصفحات الجوال التي لا تدعم البثّ
   try{
-    const r = await api('/api/chat', { method:'POST', body:{ studentId:activeChild, message:q } });
+    const r = await api('/api/chat', { method:'POST', body:{ studentId:activeChild, message:q, convoId:activeConvo } });
     if(r.fallback) throw new Error(r.error || 'ai');
     renderResult(r); return;
   }catch(e2){
@@ -920,7 +1001,7 @@ function timeAgo(ts){ const d=(Date.now()-ts)/1000; if(d<60)return'الآن'; if
 
 /* expose for inline onclick */
 function setChild(id){ activeChild = id; go('chat'); }
-Object.assign(window, { go, viewFile, filterFiles, openTeacher, delTeacher, openStudent, openThread, sendMsg, closeModal, setChild, rosterGo });
+Object.assign(window, { go, viewFile, filterFiles, openTeacher, delTeacher, openStudent, openThread, sendMsg, closeModal, setChild, rosterGo, openConvo, delConvo });
 
 /* ============================================================
    مؤشّر مخصّص — نقطة دقيقة + حلقة تتبع بتأخير، تكبر على العناصر
