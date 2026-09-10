@@ -30,27 +30,11 @@ function verifyPw(pw, stored){
 function seed(){
   return {
     users: [
-      { id:'admin1', role:'admin', user:'admin', pass:hashPw('1234'), name:'أ. خالد المدير', perms:Object.keys(PERMS) },
-      { id:'t1', role:'teacher', user:'sara',  pass:hashPw('1234'), name:'أ. سارة الغامدي',   subject:'الرياضيات', nid:'1088776655', perms:['files','messages'] },
-      { id:'t2', role:'teacher', user:'noura', pass:hashPw('1234'), name:'أ. نورة القحطاني', subject:'العلوم',     nid:'1099887766', perms:['files','messages'] },
-      { id:'p1', role:'parent',  user:'parent', pass:hashPw('1234'), name:'ولي أمر — فهد', children:['s1','s2'] },
+      { id:'admin1', role:'admin', user:'naif', pass:hashPw('43321'), name:'أ. نايف المدير', perms:Object.keys(PERMS) },
+      { id:'t1', role:'teacher', user:'ali', pass:hashPw('4321'), name:'أ. علي', subject:'الرياضيات', nid:'', perms:['files','messages'] },
     ],
-    students: [
-      { id:'s1', name:'عبدالله فهد', grade:'الثاني متوسط', classNo:'2/أ', parent:'p1', attendance:96,
-        grades:{ 'الرياضيات':92,'العلوم':88,'اللغة العربية':95,'اللغة الإنجليزية':78,'الدراسات الإسلامية':97,'الاجتماعيات':85 },
-        notes:'طالب مجتهد، متميز في الرياضيات. يحتاج متابعة في الإنجليزي.' },
-      { id:'s2', name:'سارة فهد', grade:'الرابع ابتدائي', classNo:'4/ب', parent:'p1', attendance:99,
-        grades:{ 'الرياضيات':99,'العلوم':94,'اللغة العربية':90,'اللغة الإنجليزية':92,'الدراسات الإسلامية':100,'الاجتماعيات':96 },
-        notes:'طالبة متفوقة على مستوى الصف. سلوك ممتاز.' },
-    ],
-    files: [
-      { id:'f1', owner:'t1', ownerName:'أ. سارة الغامدي', subject:'الرياضيات', name:'درجات اختبار الفصل الأول.txt',
-        status:'approved', mime:'text/plain', path:null,
-        content:'كشف درجات — مادة الرياضيات\nالصف الثاني متوسط 2/أ\n\nعبدالله فهد: 92\nنواف سعد: 84\nعمر ماجد: 77\nيزيد خالد: 90\n\nملاحظة: مستوى عام جيد جداً.', ts:Date.now()-864e5*2 },
-      { id:'f2', owner:'t2', ownerName:'أ. نورة القحطاني', subject:'العلوم', name:'خطة الوحدة الثالثة.txt',
-        status:'pending', mime:'text/plain', path:null,
-        content:'خطة درس — مادة العلوم\nالوحدة الثالثة: الطاقة\n\nالأهداف:\n1. أن يعرّف الطالب الطاقة الحركية.\n2. أن يميز بين أنواع الطاقة.\n\nالأنشطة: تجربة عملية + عرض مرئي.', ts:Date.now()-864e5 },
-    ],
+    students: [],
+    files: [],
     threads: {},   // "idA|idB" (مرتّبة) -> [{ from, text, ts }]
     notifs: {},    // userId -> [{ id, text, sub, ts, read }]
     tokens: {},    // token -> userId
