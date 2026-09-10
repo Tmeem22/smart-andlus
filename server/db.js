@@ -71,7 +71,20 @@ async function init(){
     loadFile();
     console.log('التخزين: ملف محلي data.json (غير دائم على الاستضافة)');
   }
+  ensureShape();   // ترقية أي بيانات قديمة تنقصها حقول جديدة
   return DB;
+}
+
+/* يضمن وجود كل الحقول العليا (لبيانات أُنشئت قبل إضافة حقول جديدة) */
+function ensureShape(){
+  if(!DB || typeof DB !== 'object') DB = seed();
+  DB.users   = DB.users   || [];
+  DB.students= DB.students|| [];
+  DB.files   = DB.files   || [];
+  DB.threads = DB.threads || {};
+  DB.notifs  = DB.notifs  || {};
+  DB.convos  = DB.convos  || {};
+  DB.tokens  = DB.tokens  || {};
 }
 
 function persist(){
