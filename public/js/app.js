@@ -450,20 +450,30 @@ async function sendChat(){
     }
   }catch(e){ failed = { error:e.message }; }
 
-  if(final){
-    const s = final.student, avg = final.avg;
+  // رسم النتيجة (نفس الشكل للمتدفّق وغير المتدفّق)
+  const renderResult = (r) => {
+    const s = r.student, avg = r.avg;
     const who = s ? `${s.name}${s.classNo?' — '+s.classNo:''}` : '';
     let extra = '';
-    if(final.chart && s) extra += barChart(s.grades, `درجات الطالب ${s.name}`, `${s.grade||''} ${s.classNo?'· '+s.classNo:''} — ${Object.keys(s.grades).length} مواد`);
-    if(final.donut && s) extra += donut(s.attendance, 'المواظبة', `حضور الطالب ${s.name}`, who);
-    if(final.report && s) extra += repCardBox(s, avg != null ? avg : 0);
-    if(final.top && final.topData) extra += topChart(final.topData);
-    fill(b, fmt(final.text || cleanLive(full)) + extra);
-    return;
+    if(r.chart && s && s.grades && Object.keys(s.grades).length)
+      extra += barChart(s.grades, `درجات الطالب ${s.name}`, `${s.grade||''} ${s.classNo?'· '+s.classNo:''}`);
+    if(r.donut && s) extra += donut(s.attendance, 'المواظبة', `حضور الطالب ${s.name}`, who);
+    if(r.report && s && s.grades && Object.keys(s.grades).length) extra += repCardBox(s, avg != null ? avg : 0);
+    if(r.top && r.topData) extra += topChart(r.topData);
+    fill(b, fmt(r.text || cleanLive(full)) + extra);
+  };
+  if(final){ renderResult(final); return; }
+
+  // احتياط: طلب غير متدفّق — يعمل على متصفحات الجوال التي لا تدعم البثّ
+  try{
+    const r = await api('/api/chat', { method:'POST', body:{ studentId:activeChild, message:q } });
+    if(r.fallback) throw new Error(r.error || 'ai');
+    renderResult(r); return;
+  }catch(e2){
+    const s = failed && failed.student;
+    fill(b, `<p class="small muted" style="margin:0 0 8px">⚠️ تعذّر الاتصال بالمساعد الذكي — ${esc((failed&&failed.error)||e2.message||'')}</p>`
+          + (s && s.grades ? localReply(q, s, failed.avg || 0) : ''));
   }
-  const s = failed && failed.student;
-  fill(b, `<p class="small muted" style="margin:0 0 8px">⚠️ تعذّر الاتصال بالمساعد الذكي — ${esc((failed&&failed.error)||'')}</p>`
-        + (s && s.grades ? localReply(q, s, failed.avg || 0) : ''));
 }
 /* fallback محلي */
 function localReply(q, s, avg){
