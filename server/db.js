@@ -59,24 +59,43 @@ function seed(){
 
 /* ---------- تحميل / حفظ ---------- */
 let DB;
-function loadDB(){
+/* ---------- التخزين: MongoDB (دائم) إن وُجد MONGODB_URI، وإلا ملف محلي ---------- */
+const URI = process.env.MONGODB_URI || '';
+let coll = null;   // مجموعة Mongo عند التفعيل
+
+function loadFile(){
   try {
     if(fs.existsSync(DATA_FILE)){ DB = JSON.parse(fs.readFileSync(DATA_FILE,'utf8')); }
-    else { DB = seed(); saveDB(); }
-  } catch(e){ console.error('data.json تالف — إعادة البذر', e.message); DB = seed(); saveDB(); }
+    else { DB = seed(); fs.writeFileSync(DATA_FILE, JSON.stringify(DB,null,2)); }
+  } catch(e){ console.error('data.json تالف — إعادة البذر', e.message); DB = seed(); }
   return DB;
 }
-let saveTimer=null;
-function saveDB(){
-  // كتابة مؤجّلة بسيطة لتقليل I/O
-  clearTimeout(saveTimer);
-  saveTimer = setTimeout(()=>{
-    try { fs.writeFileSync(DATA_FILE, JSON.stringify(DB,null,2)); } catch(e){ console.error('فشل الحفظ', e.message); }
-  }, 120);
+
+/* يُستدعى مرة واحدة عند الإقلاع قبل بدء الخادم */
+async function init(){
+  if(URI){
+    const { MongoClient } = require('mongodb');
+    const client = new MongoClient(URI, { serverSelectionTimeoutMS: 15000 });
+    await client.connect();
+    coll = client.db(process.env.MONGODB_DB || 'smart_andlus').collection('state');
+    const doc = await coll.findOne({ _id: 'db' });
+    if(doc && doc.data){ DB = doc.data; }
+    else { DB = seed(); await coll.replaceOne({ _id:'db' }, { _id:'db', data:DB }, { upsert:true }); }
+    console.log('التخزين: MongoDB (دائم) ✓');
+  } else {
+    loadFile();
+    console.log('التخزين: ملف محلي data.json (غير دائم على الاستضافة)');
+  }
+  return DB;
 }
-function saveNow(){ try { fs.writeFileSync(DATA_FILE, JSON.stringify(DB,null,2)); } catch(e){} }
+
+function persist(){
+  if(coll){ coll.replaceOne({ _id:'db' }, { _id:'db', data:DB }, { upsert:true }).catch(e=>console.error('فشل حفظ Mongo', e.message)); }
+  else { try { fs.writeFileSync(DATA_FILE, JSON.stringify(DB,null,2)); } catch(e){ console.error('فشل الحفظ', e.message); } }
+}
+let saveTimer = null;
+function saveDB(){ clearTimeout(saveTimer); saveTimer = setTimeout(persist, 150); }   // كتابة مؤجّلة
+function saveNow(){ persist(); }
 function resetDB(){ DB = seed(); saveNow(); return DB; }
 
-loadDB();
-
-module.exports = { get DB(){ return DB; }, saveDB, saveNow, resetDB, hashPw, verifyPw, SUBJECTS, PERMS };
+module.exports = { get DB(){ return DB; }, init, saveDB, saveNow, resetDB, hashPw, verifyPw, SUBJECTS, PERMS };

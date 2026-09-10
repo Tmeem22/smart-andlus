@@ -18,8 +18,11 @@ input,select,textarea{font-family:inherit}
 ::-webkit-scrollbar-thumb{background:#c7d3ce;border-radius:8px}
 
 .btn{border:none;border-radius:12px;padding:11px 18px;font-weight:700;font-size:14px;display:inline-flex;align-items:center;gap:8px;transition:.15s;background:var(--green);color:#fff}
+.btn{transition:background .15s, transform .12s, box-shadow .15s}
 .btn:hover{background:var(--green-2)}
-.btn:active{transform:translateY(1px)}
+.btn:active{transform:scale(.95)}
+.btn svg{width:18px;height:18px;flex:none}
+.btn.block svg{width:19px;height:19px}
 .btn.gold{background:var(--gold);color:#3a2e00}
 .btn.gold:hover{background:var(--gold-2)}
 .btn.ghost{background:var(--soft);color:var(--green)}
@@ -42,7 +45,10 @@ input,select,textarea{font-family:inherit}
 
 #login{min-height:100dvh;display:grid;place-items:center;padding:24px;
   background:radial-gradient(1200px 600px at 80% -10%,rgba(18,115,90,.18),transparent),linear-gradient(160deg,#0d5c46,#0a3a2c)}
-.login-card{width:100%;max-width:440px;background:var(--card);border-radius:24px;box-shadow:0 30px 80px rgba(0,0,0,.35);overflow:hidden}
+.login-card{width:100%;max-width:440px;background:var(--card);border-radius:24px;box-shadow:0 30px 80px rgba(0,0,0,.35);overflow:hidden;animation:cardPop .55s cubic-bezier(.2,1.1,.3,1) both}
+@keyframes cardPop{from{opacity:0;transform:translateY(24px) scale(.96)}to{opacity:1;transform:none}}
+.brand-logo{animation:logoFloat 3.5s ease-in-out infinite}
+@keyframes logoFloat{0%,100%{transform:translateY(0)}50%{transform:translateY(-6px)}}
 .login-head{background:var(--green);color:#fff;padding:30px 28px 26px;text-align:center;position:relative;background-image:var(--pattern)}
 .brand-logo{width:64px;height:64px;margin:0 auto 12px;border-radius:18px;background:linear-gradient(145deg,#fff,#f0e6c8);display:grid;place-items:center;box-shadow:0 8px 20px rgba(0,0,0,.25)}
 .brand-logo svg{width:38px;height:38px}
@@ -57,6 +63,27 @@ input,select,textarea{font-family:inherit}
 .demo-hint{margin-top:16px;font-size:12px;color:var(--muted);background:var(--soft);border-radius:12px;padding:12px 14px;line-height:1.7}
 .demo-hint b{color:var(--green)}
 .err{color:var(--danger);font-size:13px;font-weight:600;margin-top:4px;min-height:18px}
+
+/* ---------- معالج اختيار الدور ---------- */
+.wz-step{animation:wzIn .35s cubic-bezier(.22,.9,.3,1)}
+@keyframes wzIn{from{opacity:0;transform:translateY(14px) scale(.98)}to{opacity:1;transform:none}}
+.wz-ic{width:76px;height:76px;margin:4px auto 14px;border-radius:22px;display:grid;place-items:center;
+  background:linear-gradient(145deg,var(--soft),#fff);color:var(--green);box-shadow:0 8px 22px rgba(13,92,70,.12);
+  animation:wzPop .5s cubic-bezier(.2,1.2,.3,1) both}
+.wz-ic svg{width:38px;height:38px}
+@keyframes wzPop{from{opacity:0;transform:scale(.5) rotate(-8deg)}to{opacity:1;transform:none}}
+.wz-q{margin:0 0 4px;font-size:21px;text-align:center;color:var(--ink)}
+.wz-sub{margin:0 0 18px;text-align:center;color:var(--muted);font-size:14px}
+.wz-actions{display:flex;flex-direction:column;gap:10px}
+.wz-actions .btn{justify-content:center;font-size:15px;padding:13px 18px}
+.wz-actions .btn svg{width:20px;height:20px;flex:none}
+.wz-yes{animation:wzUp .4s .05s both}.wz-no{animation:wzUp .4s .12s both}
+.wz-child,.wz-r1{animation:wzUp .4s .05s both}.wz-guardian,.wz-r2{animation:wzUp .4s .12s both}
+.wz-back,.wz-r3{animation:wzUp .4s .19s both}
+@keyframes wzUp{from{opacity:0;transform:translateY(10px)}to{opacity:1;transform:none}}
+#loginForm.form-in{animation:wzIn .32s cubic-bezier(.22,.9,.3,1)}
+#lgBack{color:var(--muted);background:transparent}
+#lgBack:hover{background:var(--soft)}
 
 #app{display:none;min-height:100dvh}
 .topbar{background:var(--green);color:#fff;height:62px;flex:none;display:flex;align-items:center;gap:14px;padding:0 18px;overflow:hidden;position:sticky;top:0;z-index:40;background-image:var(--pattern)}
@@ -75,13 +102,116 @@ input,select,textarea{font-family:inherit}
 .user-pill .rl{font-size:11px;opacity:.8}
 .layout{display:flex;height:calc(100dvh - 62px)}
 .side{width:240px;background:var(--card);border-left:1px solid var(--line);padding:16px 12px;flex:none;overflow-y:auto}
-.side nav{display:flex;flex-direction:column;gap:4px}
-.nav-item{display:flex;align-items:center;gap:11px;padding:11px 13px;border-radius:12px;color:var(--muted);font-weight:600;font-size:14px;border:none;background:none;text-align:right;width:100%;transition:.12s}
-.nav-item svg{width:20px;height:20px;flex:none}
-.nav-item:hover{background:var(--soft);color:var(--green)}
-.nav-item.active{background:var(--green);color:#fff}
+.side nav{display:flex;flex-direction:column;gap:4px;position:relative}
+.nav-indicator{position:absolute;top:0;right:0;border-radius:12px;background:var(--green);z-index:0;opacity:0;
+  box-shadow:0 6px 18px rgba(13,92,70,.28);
+  transition:transform .42s cubic-bezier(.5,.05,.15,1), width .42s cubic-bezier(.5,.05,.15,1), height .42s cubic-bezier(.5,.05,.15,1), opacity .25s}
+.nav-item{position:relative;z-index:1;display:flex;align-items:center;gap:11px;padding:11px 13px;border-radius:12px;color:var(--muted);font-weight:600;font-size:14px;border:none;background:none;text-align:right;width:100%;transition:color .2s, transform .15s}
+.nav-item svg{width:20px;height:20px;flex:none;transition:transform .2s ease}
+.nav-item:not(.active):hover{color:var(--green)}
+.nav-item:not(.active):hover svg{transform:scale(1.15)}
+.nav-item.active{color:#fff}
+.nav-item.active svg{transform:scale(1.08)}
 .nav-item .badge{margin-inline-start:auto}
 .main{flex:1;padding:22px;min-width:0;min-height:0;display:flex;flex-direction:column;overflow-y:auto}
+/* حركة انتقال الصفحات + ظهور متتابع للبطاقات */
+/* ظهور البيانات من الأعلى للأسفل يديره JS (initReveal) بترتيب موحّد */
+@keyframes cardIn{from{opacity:0;transform:translateY(16px)}to{opacity:1;transform:none}}
+.stat{transition:transform .18s ease, box-shadow .18s ease}
+.stat:hover{transform:translateY(-3px);box-shadow:0 12px 30px rgba(13,92,70,.14)}
+.card{transition:transform .18s ease, box-shadow .18s ease}
+.viz,.report{animation:cardIn .45s cubic-bezier(.22,.9,.3,1) both}
+.msg{animation:msgPop .38s cubic-bezier(.2,1.2,.35,1) both}
+@keyframes msgPop{from{opacity:0;transform:translateY(10px) scale(.96)}to{opacity:1;transform:none}}
+
+/* ============================================================
+   EPIC ANIMATIONS
+   ============================================================ */
+/* خلفية الدخول متحركة + أشكال طائفة */
+#login{background:linear-gradient(135deg,#0d5c46,#0a3a2c,#12735a,#0a4636);background-size:400% 400%;animation:bgShift 16s ease infinite;overflow:hidden}
+@keyframes bgShift{0%{background-position:0% 50%}50%{background-position:100% 50%}100%{background-position:0% 50%}}
+#login::before,#login::after{content:'';position:absolute;border-radius:42%;background:radial-gradient(circle at 30% 30%,rgba(201,162,39,.22),transparent 70%);filter:blur(6px);pointer-events:none;z-index:0}
+#login::before{width:360px;height:360px;top:-90px;right:-80px;animation:blob 18s ease-in-out infinite}
+#login::after{width:300px;height:300px;bottom:-70px;left:-60px;background:radial-gradient(circle at 30% 30%,rgba(18,115,90,.35),transparent 70%);animation:blob 22s ease-in-out infinite reverse}
+@keyframes blob{0%,100%{transform:translate(0,0) rotate(0)}33%{transform:translate(30px,40px) rotate(60deg)}66%{transform:translate(-20px,20px) rotate(160deg)}}
+.login-card{position:relative;z-index:1}
+/* لمعان عنوان الدخول */
+.login-head h1{background:linear-gradient(90deg,#fff 20%,#f6e9c2 50%,#fff 80%);background-size:220% 100%;-webkit-background-clip:text;background-clip:text;-webkit-text-fill-color:transparent;animation:shine 3.2s linear infinite}
+@keyframes shine{to{background-position:-220% 0}}
+/* حلقة توهج حول الشعار */
+.brand-logo{position:relative}
+.brand-logo::after{content:'';position:absolute;inset:-6px;border-radius:24px;box-shadow:0 0 0 0 rgba(201,162,39,.5);animation:glow 2.4s ease-out infinite}
+@keyframes glow{0%{box-shadow:0 0 0 0 rgba(201,162,39,.45)}70%{box-shadow:0 0 0 16px rgba(201,162,39,0)}100%{box-shadow:0 0 0 0 rgba(201,162,39,0)}}
+
+/* لمعان يمرّ على الأزرار عند المرور */
+.btn{position:relative;overflow:hidden;isolation:isolate}
+.btn::after{content:'';position:absolute;inset:0;z-index:-1;background:linear-gradient(120deg,transparent 30%,rgba(255,255,255,.4) 50%,transparent 70%);transform:translateX(-130%);transition:transform .6s ease}
+.btn:hover::after{transform:translateX(130%)}
+.btn.ghost::after{background:linear-gradient(120deg,transparent 30%,rgba(13,92,70,.14) 50%,transparent 70%)}
+/* موجة الضغط (ripple) */
+.ripple{position:absolute;border-radius:50%;transform:scale(0);background:rgba(255,255,255,.45);animation:ripple .6s ease-out;pointer-events:none;z-index:0}
+.btn.ghost .ripple,.btn.gold .ripple{background:rgba(13,92,70,.22)}
+@keyframes ripple{to{transform:scale(3);opacity:0}}
+
+/* بطاقات: رفع + ميل خفيف عند المرور */
+.card:hover,.viz:hover{transform:translateY(-4px)}
+.viz,.report{transition:transform .2s ease, box-shadow .2s ease}
+.viz:hover{box-shadow:0 16px 40px rgba(13,92,70,.15)}
+/* أعمدة الرسم: لمعان يمرّ */
+.hbar-track i,.r-bar i{position:relative;overflow:hidden}
+.hbar-track i::after{content:'';position:absolute;inset:0;background:linear-gradient(100deg,transparent 30%,rgba(255,255,255,.35) 50%,transparent 70%);transform:translateX(-100%);animation:barShine 2.4s ease-in-out .5s infinite}
+@keyframes barShine{0%{transform:translateX(-100%)}55%,100%{transform:translateX(220%)}}
+
+/* أيقونات الإحصاء تنبض */
+.stat .ic{transition:transform .2s ease}
+.stat:hover .ic{transform:scale(1.12) rotate(-6deg)}
+
+/* التنقل: شريط مؤشّر ينزلق */
+.nav-item{position:relative}
+.nav-item::before{content:'';position:absolute;right:0;top:50%;height:0;width:3px;border-radius:3px;background:var(--gold);transform:translateY(-50%);transition:height .22s ease}
+.nav-item.active::before{height:60%}
+.nav-item:not(.active):hover{transform:translateX(-3px)}
+.nav-item{transition:transform .15s ease, background .12s, color .12s}
+
+/* زر الإرسال ينبض ويميل */
+.send-btn{transition:transform .18s cubic-bezier(.2,1.4,.3,1), background .15s}
+.send-btn:hover{transform:scale(1.1) rotate(-8deg)}
+.send-btn:active{transform:scale(.9)}
+
+/* رقائق الاقتراح */
+.suggest button{transition:transform .15s ease, border-color .15s, background .15s}
+.suggest button:hover{transform:translateY(-2px) scale(1.03)}
+
+/* التوست يقفز */
+.toast{animation:toastIn .4s cubic-bezier(.2,1.3,.3,1)}
+@keyframes toastIn{from{opacity:0;transform:translateY(20px) scale(.9)}to{opacity:1;transform:none}}
+
+/* الشريط العلوي: الشعار يتنفّس */
+.topbar .logo{transition:transform .3s ease}
+.topbar .logo:hover{transform:rotate(-10deg) scale(1.08)}
+
+/* أزرار المعالج: أيقونة تكبر عند المرور */
+.wz-actions .btn:hover svg{transform:scale(1.15)}
+.wz-actions .btn svg{transition:transform .2s ease}
+
+/* ============================================================
+   مؤشّر مخصّص (نقطة + حلقة تتبع بتأخير) — سطح المكتب فقط
+   ============================================================ */
+@media (pointer:fine){
+  html.customcur, html.customcur *{cursor:none !important}
+  html.customcur input, html.customcur textarea, html.customcur [contenteditable]{cursor:text !important}
+}
+.cursor-dot,.cursor-ring{position:fixed;top:0;left:0;pointer-events:none;z-index:10000;border-radius:50%;
+  transform:translate(-50%,-50%);will-change:transform;mix-blend-mode:normal}
+.cursor-dot{width:7px;height:7px;background:var(--gold);box-shadow:0 0 8px rgba(201,162,39,.6);
+  transition:width .18s ease, height .18s ease, opacity .2s, background .2s}
+.cursor-ring{width:34px;height:34px;border:2px solid rgba(13,92,70,.6);background:rgba(13,92,70,0);
+  transition:width .28s cubic-bezier(.3,1.3,.4,1), height .28s cubic-bezier(.3,1.3,.4,1), border-color .25s, background .25s, opacity .2s}
+.cursor-ring.hover{width:56px;height:56px;border-color:var(--gold);background:rgba(201,162,39,.10)}
+.cursor-dot.hover{width:0;height:0}
+.cursor-ring.down{width:26px;height:26px;border-color:var(--gold)}
+.cursor-dot.down{background:var(--green)}
+.cursor-hidden .cursor-dot,.cursor-hidden .cursor-ring{opacity:0}
 .main>*{flex:0 0 auto}
 .main>.chat-wrap,.main>.mgr{flex:1 1 auto;min-height:340px}
 .page-head{margin-bottom:18px}
@@ -251,7 +381,8 @@ svg.chart{width:100%;height:auto;background:#fff;border-radius:12px}
 .toast{background:var(--ink);color:#fff;padding:13px 18px;border-radius:13px;font-size:14px;font-weight:600;box-shadow:0 10px 30px rgba(0,0,0,.3);display:flex;align-items:center;gap:10px;animation:slideup .25s}
 .toast .dot{width:9px;height:9px;border-radius:50%;background:var(--gold)}
 @keyframes slideup{from{transform:translateY(14px);opacity:0}to{transform:none;opacity:1}}
-.notif-panel{position:absolute;top:56px;left:12px;width:320px;background:#fff;border-radius:16px;box-shadow:0 20px 60px rgba(0,0,0,.25);border:1px solid var(--line);z-index:60;overflow:hidden}
+.notif-panel{position:fixed;top:58px;left:12px;width:min(320px,calc(100vw - 24px));background:#fff;border-radius:16px;box-shadow:0 20px 60px rgba(0,0,0,.3);border:1px solid var(--line);z-index:1200;overflow:hidden;max-height:70dvh;overflow-y:auto;animation:notifIn .18s ease}
+@keyframes notifIn{from{opacity:0;transform:translateY(-8px)}to{opacity:1;transform:none}}
 .notif-panel .nh{padding:14px 16px;border-bottom:1px solid var(--line);font-weight:800;font-family:'Cairo';display:flex;justify-content:space-between;align-items:center}
 .notif-item{padding:12px 16px;border-bottom:1px solid var(--line);font-size:13px;display:flex;gap:10px}
 .notif-item .nd{width:8px;height:8px;border-radius:50%;background:var(--gold);margin-top:5px;flex:none}

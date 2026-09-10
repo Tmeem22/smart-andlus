@@ -187,5 +187,10 @@ function search(q, page = 1, per = 25){
 const stats = () => IDX.stats;
 const ready = () => IDX.ready;
 const count = () => IDX.list.length;
+const list = () => IDX.list;
+/* جلب طالب بالرقم (id) — بحث فوري */
+const get = (id) => IDX.byId.get(norm(id)) || null;
+/* طلاب وليّ أمر برقم هويته */
+const byGuardian = (gid) => { const g = norm(gid); return IDX.list.filter(s => norm(s.guardianId) === g); };
 
-module.exports = { importFile, hydrate, findStudents, classOf, search, stats, ready, count, norm };
+module.exports = { importFile, hydrate, findStudents, classOf, search, stats, ready, count, norm, list, get, byGuardian };

@@ -76,7 +76,29 @@ function contactsFor(u){
    AUTH
    ============================================================ */
 app.post('/api/login', (req,res)=>{
-  const { role, user, pass } = req.body || {};
+  const { role, user, pass, idType, identifier } = req.body || {};
+
+  // دخول وليّ الأمر بالهوية: رقم الطالب أو رقم هوية وليّ الأمر
+  if(role === 'parent' && identifier){
+    const idv = String(identifier).trim();
+    if(!idv) return res.status(400).json({ error:'أدخل رقم الهوية.' });
+    let kids = [];
+    if(idType === 'guardian') kids = roster.ready() ? roster.byGuardian(idv) : [];
+    else { const s = findStudentAny(idv); if(s) kids = [s]; }
+    if(!kids.length) return res.status(401).json({ error: idType==='guardian'
+      ? 'لم نعثر على أبناء مسجّلين بهذا الرقم.' : 'لم نعثر على طالب بهذا الرقم في السجل.' });
+    const childIds = kids.map(k => k.id);
+    const gname = kids[0].guardian || 'ولي الأمر';
+    const key = 'parent:' + idType + ':' + idv;
+    let pu = db.DB.users.find(u => u.role==='parent' && u.idKey===key);
+    if(!pu){ pu = { id:'pv'+Date.now().toString(36)+Math.random().toString(16).slice(2,5), role:'parent',
+      name: idType==='guardian' ? ('ولي أمر — '+gname) : ('ولي أمر — '+(kids[0].name||'')),
+      idKey:key, children:childIds, virtual:true }; db.DB.users.push(pu); }
+    else pu.children = childIds;
+    const token = newToken(pu.id); saveDB();
+    return res.json({ token, me: publicUser(pu) });
+  }
+
   const u = db.DB.users.find(x=>x.user===user && x.role===role);
   if(!u || !verifyPw(pass, u.pass)) return res.status(401).json({ error:'بيانات الدخول غير صحيحة لهذا الدور.' });
   const token = newToken(u.id);
@@ -88,8 +110,11 @@ app.post('/api/logout', auth, (req,res)=>{ delete db.DB.tokens[req.token]; saveD
 /* ============================================================
    PARENT — children + chat
    ============================================================ */
+/* طالب من قائمة النظام أو من سجل الإكسل المفهرس */
+function findStudentAny(id){ return db.DB.students.find(s=>s.id===id) || roster.get(id); }
+
 app.get('/api/children', auth, requireRole('parent'), (req,res)=>{
-  const kids = (req.user.children||[]).map(id=> db.DB.students.find(s=>s.id===id)).filter(Boolean);
+  const kids = (req.user.children||[]).map(id=> findStudentAny(id)).filter(Boolean).map(clientStudent);
   res.json({ children: kids });
 });
 
@@ -108,10 +133,10 @@ function resolveChat(user, body){
   const message = String((body && body.message) || '').trim();
   if(user.role === 'parent'){
     const sid = body.studentId;
-    const s = db.DB.students.find(x=>x.id===sid);
+    const s = findStudentAny(sid);
     if(!s || !(user.children||[]).includes(sid)) return { error:'الطالب غير موجود' };
     const avg = avgOf(s);
-    return { message, key:user.id+':'+sid, system:llm.promptForParent(s, avg), student:clientStudent(s), avg };
+    return { message, key:user.id+':'+sid, system:llm.promptForParent(clientStudent(s), avg), student:clientStudent(s), avg };
   }
   // مدير / معلم: بحث فوري في الفهرس
   const hit = roster.ready() ? roster.findStudents(message, 1)[0] : null;
@@ -402,17 +427,14 @@ io.on('connection', (socket)=>{
     io.to('u:'+uid).emit('chat:message', { ...msg, peer:to, self:true });
     pushNotif(to, 'رسالة جديدة من '+socket.user.name, String(text).slice(0,40));
   });
+});
 
-  // إشارات المكالمات (محاكاة — بدون WebRTC فعلي)
-  socket.on('call:invite', ({ to, type })=>{
-    io.to('u:'+to).emit('call:incoming', { from:uid, name:socket.user.name, type });
+(async () => {
+  try { await db.init(); }               // Mongo (دائم) أو ملف محلي
+  catch(e){ console.error('فشل الاتصال بقاعدة البيانات:', e.message); process.exit(1); }
+  roster.hydrate();                        // إعادة بناء الفهرس من الحالة المحمّلة
+  server.listen(PORT, ()=>{
+    console.log('ذكاء الأندلس يعمل: http://localhost:'+PORT);
+    console.log('النموذج: '+llm.MODEL+'  | المفتاح: '+(process.env.FIREWORKS_API_KEY?'موجود ✓':'مفقود ✗'));
   });
-  socket.on('call:end', ({ to })=>{ io.to('u:'+to).emit('call:end', { from:uid }); });
-});
-
-roster.hydrate();   // إعادة بناء الفهرس من data.json — بدون فتح الإكسل
-
-server.listen(PORT, ()=>{
-  console.log('ذكاء الأندلس يعمل: http://localhost:'+PORT);
-  console.log('النموذج: '+llm.MODEL+'  | المفتاح: '+(process.env.FIREWORKS_API_KEY?'موجود ✓':'مفقود ✗'));
-});
+})();

@@ -7,8 +7,12 @@ services:
     startCommand: npm start
     envVars:
       - key: FIREWORKS_API_KEY
-        sync: false            # تُضاف يدوياً في لوحة Render (سرّية)
+        sync: false            # يُضاف يدوياً في لوحة Render (سرّي)
       - key: FIREWORKS_MODEL
         value: accounts/fireworks/models/glm-5p3-flash
+      - key: MONGODB_URI
+        sync: false            # رابط MongoDB Atlas — للتخزين الدائم (سرّي)
+      - key: MONGODB_DB
+        value: smart_andlus
       - key: NODE_VERSION
         value: "20"

@@ -3,7 +3,7 @@
    · السياق يُبنى من فهرس الذاكرة (roster) — لا يُعاد قراءة الإكسل.
    · يدعم البثّ الحي (streaming) حرفاً بحرف.
    ============================================================ */
-const { DB } = require('./db');
+const db = require('./db');
 const roster = require('./roster');
 
 const API_URL = 'https://api.fireworks.ai/inference/v1/chat/completions';
@@ -11,7 +11,7 @@ const MODEL   = process.env.FIREWORKS_MODEL || 'accounts/fireworks/models/glm-5p
 
 /* مصادر نصية إضافية (ملفات المدير المقبولة) — مقصوصة، ليست 300 صف */
 function brainNotes(){
-  return DB.files
+  return db.DB.files
     .filter(f => f.status === 'approved' && f.content)
     .map(f => `# ${f.name} (${f.subject})\n${f.content.slice(0,800)}`)
     .join('\n\n').slice(0, 2500);

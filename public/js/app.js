@@ -54,25 +54,136 @@ const hints = {
   teacher:'<b>معلم:</b> sara / 1234 · noura / 1234',
   admin:'<b>مدير:</b> admin / 1234',
 };
-const neutralHint = 'أدخل اسم المستخدم وكلمة المرور الخاصة بك.';
-document.querySelectorAll('.role-tab').forEach(t => t.onclick = () => {
-  document.querySelectorAll('.role-tab').forEach(x => x.classList.remove('active'));
-  t.classList.add('active'); SELECTED_ROLE = t.dataset.role;
-  el('demoHint').innerHTML = SHOW_DEMO_HINTS ? hints[SELECTED_ROLE] : neutralHint; el('lgErr').textContent = '';
-});
-el('demoHint').innerHTML = SHOW_DEMO_HINTS ? hints.parent : neutralHint;
-el('lgBtn').onclick = doLogin;
-el('lgPass').addEventListener('keydown', e => { if(e.key === 'Enter') doLogin(); });
+let PARENT_IDTYPE = 'student';   // student | guardian
+const roleIcon = {
+  parent:'<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8"><path d="M17 21v-2a4 4 0 0 0-4-4H7a4 4 0 0 0-4 4v2"/><circle cx="10" cy="7" r="4"/><path d="M21 21v-2a4 4 0 0 0-3-3.87"/></svg>',
+  teacher:'<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8"><path d="M22 10 12 5 2 10l10 5 10-5Z"/><path d="M6 12v5c0 1 2.7 3 6 3s6-2 6-3v-5"/></svg>',
+  admin:'<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8"><path d="M12 2 4 6v6c0 5 3.4 7.7 8 10 4.6-2.3 8-5 8-10V6l-8-4Z"/><path d="m9 12 2 2 4-4"/></svg>',
+  id:'<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8"><rect x="3" y="5" width="18" height="14" rx="2"/><circle cx="9" cy="12" r="2.2"/><path d="M14 10h4M14 14h4M6.5 16a3 3 0 0 1 5 0"/></svg>',
+};
+
+/* ---------- معالج اختيار الدور (متحرك) ---------- */
+function wiz(html){
+  const w = el('wizard');
+  w.innerHTML = `<div class="wz-step">${html}</div>`;
+}
+function wzYesNo(icon, title, sub, onYes, onNo, extra){
+  wiz(`
+    <div class="wz-ic">${icon}</div>
+    <h2 class="wz-q">${title}</h2>
+    ${sub ? `<p class="wz-sub">${sub}</p>` : ''}
+    <div class="wz-actions">
+      <button class="btn block wz-yes">نعم</button>
+      <button class="btn ghost block wz-no">لا</button>
+    </div>
+    ${extra || ''}`);
+  el('wizard').querySelector('.wz-yes').onclick = onYes;
+  el('wizard').querySelector('.wz-no').onclick = onNo;
+}
+function stepParentAsk(){
+  wzYesNo(roleIcon.parent, 'هل أنت وليّ أمر؟', 'وتودّ متابعة مستوى ابنك؟', stepParentId, stepTeacherAsk);
+}
+function stepParentId(){
+  wiz(`
+    <div class="wz-ic">${roleIcon.id}</div>
+    <h2 class="wz-q">بأي هوية تسجّل الدخول؟</h2>
+    <p class="wz-sub">اختر الطريقة الأنسب لك</p>
+    <div class="wz-actions">
+      <button class="btn block wz-child">${roleIcon.parent}<span>بهوية ابني</span></button>
+      <button class="btn gold block wz-guardian">${roleIcon.id}<span>بهويتي أنا</span></button>
+      <button class="btn ghost block wz-back">↻ رجوع</button>
+    </div>`);
+  const q = el('wizard');
+  q.querySelector('.wz-child').onclick = () => openForm('parent', 'student');
+  q.querySelector('.wz-guardian').onclick = () => openForm('parent', 'guardian');
+  q.querySelector('.wz-back').onclick = stepParentAsk;
+}
+function stepTeacherAsk(){
+  wzYesNo(roleIcon.teacher, 'هل أنت معلّم؟', 'للدخول إلى ملفات مادتك والمراسلة',
+    () => openForm('teacher'), stepAdminAsk);
+}
+function stepAdminAsk(){
+  wzYesNo(roleIcon.admin, 'هل أنت مدير المدرسة؟', 'لإدارة الطلاب والمعلمين والنظام',
+    () => openForm('admin'), stepRestart);
+}
+function stepRestart(){
+  wiz(`
+    <div class="wz-ic">${I.logo}</div>
+    <h2 class="wz-q">لنبدأ من جديد</h2>
+    <p class="wz-sub">اختر صفتك للدخول إلى «ذكاء الأندلس»</p>
+    <div class="wz-actions">
+      <button class="btn block wz-r1">${roleIcon.parent}<span>وليّ أمر</span></button>
+      <button class="btn ghost block wz-r2">${roleIcon.teacher}<span>معلّم</span></button>
+      <button class="btn ghost block wz-r3">${roleIcon.admin}<span>مدير</span></button>
+    </div>`);
+  const q = el('wizard');
+  q.querySelector('.wz-r1').onclick = stepParentId;
+  q.querySelector('.wz-r2').onclick = () => openForm('teacher');
+  q.querySelector('.wz-r3').onclick = () => openForm('admin');
+}
+
+/* إظهار نموذج الدخول المناسب للدور */
+function openForm(role, idType){
+  SELECTED_ROLE = role; PARENT_IDTYPE = idType || 'student';
+  el('wizard').hidden = true;
+  const f = el('loginForm'); f.hidden = false;
+  f.classList.remove('form-in'); void f.offsetWidth; f.classList.add('form-in');
+  const isParent = role === 'parent';
+  el('parentFields').hidden = !isParent;
+  el('passFields').hidden = isParent;
+  el('lgErr').textContent = '';
+  if(isParent){
+    el('idLabel').textContent = idType === 'guardian' ? 'رقم هويتك (وليّ الأمر)' : 'رقم هوية الطالب';
+    el('lgId').placeholder = idType === 'guardian' ? 'مثال: 1088776655' : 'مثال: ST1001';
+    setTimeout(()=> el('lgId').focus(), 60);
+    el('demoHint').innerHTML = idType === 'guardian'
+      ? 'أدخل رقم هويتك لعرض أبنائك المسجّلين.'
+      : 'أدخل رقم هوية الطالب لعرض بياناته.';
+  } else {
+    setTimeout(()=> el('lgUser').focus(), 60);
+    el('demoHint').innerHTML = SHOW_DEMO_HINTS ? hints[role] : ({teacher:'دخول المعلّم ببيانات المدرسة.', admin:'دخول مدير النظام.'}[role]);
+  }
+}
+function backToWizard(){
+  el('loginForm').hidden = true;
+  el('wizard').hidden = false;
+  stepRestart();
+}
 
 async function doLogin(){
-  const user = el('lgUser').value.trim(), pass = el('lgPass').value;
   el('lgErr').textContent = '';
+  let body;
+  if(SELECTED_ROLE === 'parent'){
+    const identifier = el('lgId').value.trim();
+    if(!identifier){ el('lgErr').textContent = 'أدخل رقم الهوية.'; return; }
+    body = { role:'parent', idType:PARENT_IDTYPE, identifier };
+  } else {
+    body = { role:SELECTED_ROLE, user:el('lgUser').value.trim(), pass:el('lgPass').value };
+  }
+  const btn = el('lgBtn'); btn.disabled = true; btn.textContent = '...جارٍ الدخول';
   try{
-    const { token, me } = await api('/api/login', { method:'POST', body:{ role:SELECTED_ROLE, user, pass } });
+    const { token, me } = await api('/api/login', { method:'POST', body });
     TOKEN = token; ME = me; localStorage.setItem('andlus_token', token);
     enterApp();
-  }catch(e){ el('lgErr').textContent = e.message; }
+  }catch(e){ el('lgErr').textContent = e.message; btn.disabled = false; btn.textContent = 'تسجيل الدخول'; }
 }
+/* موجة ضغط (ripple) على كل الأزرار */
+document.addEventListener('pointerdown', e => {
+  const btn = e.target.closest('.btn'); if(!btn) return;
+  const r = btn.getBoundingClientRect();
+  const size = Math.max(r.width, r.height);
+  const s = document.createElement('span'); s.className = 'ripple';
+  s.style.width = s.style.height = size + 'px';
+  s.style.left = (e.clientX - r.left - size/2) + 'px';
+  s.style.top = (e.clientY - r.top - size/2) + 'px';
+  btn.appendChild(s); setTimeout(() => s.remove(), 600);
+});
+
+el('lgBtn').onclick = doLogin;
+el('lgBack').onclick = backToWizard;
+el('lgId').addEventListener('keydown', e => { if(e.key === 'Enter') doLogin(); });
+el('lgPass').addEventListener('keydown', e => { if(e.key === 'Enter') doLogin(); });
+stepParentAsk();   // بداية المعالج
 function doLogout(silent){
   try{ if(!silent) api('/api/logout', { method:'POST' }); }catch(e){}
   localStorage.removeItem('andlus_token'); TOKEN = null; ME = null;
@@ -112,6 +223,8 @@ const NAV = {
 let CUR = '';
 function buildNav(){
   const nav = el('navMenu'); nav.innerHTML = '';
+  const ind = document.createElement('div'); ind.className = 'nav-indicator'; ind.id = 'navInd';
+  nav.appendChild(ind);
   NAV[ME.role].forEach(item => {
     const b = document.createElement('button'); b.className = 'nav-item'; b.dataset.id = item.id;
     b.innerHTML = item.ic + '<span>'+item.t+'</span>';
@@ -120,12 +233,24 @@ function buildNav(){
     nav.appendChild(b);
   });
 }
+/* يُنزلق المؤشّر الأخضر إلى الخانة النشطة */
+function moveNavIndicator(){
+  const ind = el('navInd'); const act = document.querySelector('.nav-item.active');
+  if(!ind || !act) return;
+  ind.style.width = act.offsetWidth + 'px';
+  ind.style.height = act.offsetHeight + 'px';
+  ind.style.transform = 'translate(' + act.offsetLeft + 'px,' + act.offsetTop + 'px)';
+  ind.style.opacity = '1';
+}
+addEventListener('resize', () => moveNavIndicator());
 function go(id){
   CUR = id;
   document.querySelectorAll('.nav-item').forEach(n => n.classList.toggle('active', n.dataset.id === id));
+  moveNavIndicator();
   const v = el('mainView'); v.dataset.filt = '';
   const map = { chat:renderChat, children:renderChildren, tfiles:renderTeacherFiles, messages:renderMessages, dash:renderDash, teachers:renderTeachers, students:renderStudents, afiles:renderAdminFiles, brain:renderBrain, roster:renderRoster };
   v.innerHTML = '<div class="empty-state">'+I.bot+'<p>جارٍ التحميل...</p></div>';
+  v.classList.remove('view-in'); void v.offsetWidth; v.classList.add('view-in');
   (map[id] || (()=> v.innerHTML=''))(v);
 }
 
@@ -141,8 +266,6 @@ function connectSocket(){
     else { unread[m.peer] = (unread[m.peer]||0) + 1; refreshMsgBadgeLocal(); }
   });
   socket.on('notif', (n) => { toast(n.text); bumpNotifBadge(); });
-  socket.on('call:incoming', (c) => incomingCall(c));
-  socket.on('call:end', () => closeCall());
 }
 
 /* ============================================================
@@ -242,6 +365,7 @@ async function renderRoster(v){
       <div id="rosterTable"><div class="empty-state small">جارٍ التحميل...</div></div>
     </div>`;
   el('rosterImport').onclick = doImport;
+  animateCounts();
   const sb = el('rosterSearch');
   if(sb){ let t; sb.oninput = () => { clearTimeout(t); t = setTimeout(()=>{ rosterQ = sb.value.trim(); rosterPage = 1; loadRosterTable(); }, 250); }; }
   if(info.ready) loadRosterTable();
@@ -550,8 +674,22 @@ async function renderDash(v){
         <button class="btn danger block" id="resetBtn">إعادة تعيين البيانات التجريبية</button></div>
     </div>`;
   el('resetBtn').onclick = async () => { if(confirm('إعادة تعيين كل البيانات التجريبية؟')){ await api('/api/reset', { method:'POST' }); toast('تمت الإعادة'); go('dash'); } };
+  animateCounts();
 }
-function stat(ic,n,label,col,bg){ return `<div class="stat"><div class="ic" style="background:${bg};color:${col}">${ic}</div><div><b>${n}</b><span>${label}</span></div></div>`; }
+function stat(ic,n,label,col,bg){ return `<div class="stat"><div class="ic" style="background:${bg};color:${col}">${ic}</div><div><b data-count="${esc(String(n))}">${n}</b><span>${label}</span></div></div>`; }
+/* عدّاد تصاعدي للأرقام في بطاقات الإحصاء */
+function animateCounts(){
+  document.querySelectorAll('.stat b[data-count]').forEach(b=>{
+    if(b.dataset.done) return; b.dataset.done='1';
+    const raw = String(b.dataset.count);
+    const m = raw.match(/^(\D*)(\d+)(.*)$/); if(!m){ return; }
+    const pre=m[1], target=+m[2], suf=m[3];
+    const dur=800, t0=performance.now();
+    function tick(t){ const p=Math.min(1,(t-t0)/dur); const val=Math.round(target*(1-Math.pow(1-p,3)));
+      b.textContent=pre+val+suf; if(p<1) requestAnimationFrame(tick); }
+    b.textContent=pre+'0'+suf; requestAnimationFrame(tick);
+  });
+}
 
 /* ============================================================
    ADMIN — teachers
@@ -694,8 +832,7 @@ async function openThread(cid){
   document.querySelectorAll('.mgr-item').forEach(b => b.classList.toggle('active', b.dataset.peer===cid));
   const chat = el('mgrChat'); if(!chat) return;
   chat.innerHTML = `<div class="mgr-chat-head"><div class="av" style="width:38px;height:38px;border-radius:11px;background:var(--green);color:#fff;display:grid;place-items:center;font-weight:800">${esc(c.name.replace(/^أ\.\s*/,'')[0])}</div>
-      <div><b>${esc(c.name)}</b><div class="small muted">${c.subject?'معلم '+esc(c.subject):'مدير النظام'}</div></div>
-      <div class="btns"><button class="icon-btn" style="background:var(--soft);color:var(--green)" onclick="startCall('${cid}')" title="مكالمة">${I.phone}</button></div></div>
+      <div><b>${esc(c.name)}</b><div class="small muted">${c.subject?'معلم '+esc(c.subject):'مدير النظام'}</div></div></div>
     <div class="mgr-stream" id="mgrStream">${messages.map(mLine).join('') || '<div class="empty-state small">ابدأ المحادثة 👋</div>'}</div>
     <div class="mgr-composer"><input id="mgrIn" placeholder="اكتب رسالة..." autocomplete="off"><button class="send-btn" style="width:44px;height:44px" onclick="sendMsg('${cid}')">${I.send}</button></div>`;
   const inp = el('mgrIn'); inp.focus(); inp.addEventListener('keydown', e => { if(e.key==='Enter') sendMsg(cid); });
@@ -710,32 +847,6 @@ function sendMsg(cid){
   inp.value = '';
 }
 function markThreadRead(cid){ api('/api/thread/'+cid).catch(()=>{}); }
-
-/* calls (signaling only) */
-let callState = null;
-function startCall(cid){
-  const c = CONTACTS.find(u=>u.id===cid); callState = { peer:cid };
-  socket.emit('call:invite', { to:cid, type:'صوتية' });
-  callModal(c.name, 'جارٍ الاتصال...', cid);
-}
-function incomingCall(c){
-  callState = { peer:c.from };
-  callModal(c.name, 'مكالمة واردة...', c.from, true);
-}
-function callModal(name, status, cid, incoming){
-  el('callRoot').innerHTML = `<div class="overlay"><div class="modal" style="max-width:340px"><div class="modal-body" style="text-align:center">
-    <div class="avatar" style="width:80px;height:80px;border-radius:24px;font-size:34px;margin:0 auto 14px;background:var(--green);color:#fff">${esc((name||'؟').replace(/^أ\.\s*/,'')[0])}</div>
-    <h3 style="margin:0">${esc(name||'')}</h3><p class="muted" id="callStatus">${status}</p>
-    <div class="typing mt"><span></span><span></span><span></span></div>
-    <div class="flex gap mt" style="justify-content:center">
-      ${incoming?`<button class="btn" onclick="answerCall('${cid}')">رد</button>`:''}
-      <button class="btn danger" onclick="hangCall('${cid}')">إنهاء</button></div>
-    <p class="small muted mt">محاكاة مكالمة — إشارات عبر Socket.IO</p></div></div></div>`;
-  if(!incoming) setTimeout(()=>{ const s = el('callStatus'); if(s) s.textContent = '(بانتظار رد الطرف الآخر)'; }, 1600);
-}
-function answerCall(cid){ const s = el('callStatus'); if(s) s.textContent = 'المكالمة جارية...'; }
-function hangCall(cid){ socket.emit('call:end', { to:cid }); closeCall(); }
-function closeCall(){ el('callRoot').innerHTML = ''; callState = null; }
 
 /* ============================================================
    NOTIFICATIONS
@@ -799,7 +910,67 @@ function timeAgo(ts){ const d=(Date.now()-ts)/1000; if(d<60)return'الآن'; if
 
 /* expose for inline onclick */
 function setChild(id){ activeChild = id; go('chat'); }
-Object.assign(window, { go, viewFile, filterFiles, openTeacher, delTeacher, openStudent, openThread, sendMsg, startCall, answerCall, hangCall, closeModal, setChild, rosterGo });
+Object.assign(window, { go, viewFile, filterFiles, openTeacher, delTeacher, openStudent, openThread, sendMsg, closeModal, setChild, rosterGo });
+
+/* ============================================================
+   مؤشّر مخصّص — نقطة دقيقة + حلقة تتبع بتأخير، تكبر على العناصر
+   ============================================================ */
+(function customCursor(){
+  if(!window.matchMedia('(pointer:fine)').matches) return;
+  const dot = document.createElement('div'); dot.className = 'cursor-dot';
+  const ring = document.createElement('div'); ring.className = 'cursor-ring';
+  document.body.append(dot, ring);
+  document.documentElement.classList.add('customcur');
+  let mx = innerWidth/2, my = innerHeight/2, rx = mx, ry = my;
+  addEventListener('pointermove', e => {
+    if(e.pointerType === 'touch') return;
+    mx = e.clientX; my = e.clientY;
+    dot.style.transform = 'translate('+mx+'px,'+my+'px) translate(-50%,-50%)';
+    document.body.classList.remove('cursor-hidden');
+  }, { passive:true });
+  addEventListener('pointerdown', () => { ring.classList.add('down'); dot.classList.add('down'); });
+  addEventListener('pointerup',   () => { ring.classList.remove('down'); dot.classList.remove('down'); });
+  document.addEventListener('mouseleave', () => document.body.classList.add('cursor-hidden'));
+  const HOVER = 'a,button,.btn,.nav-item,.role-tab,.mgr-item,.suggest button,[onclick],.file-pill,.x-btn,.icon-btn,.send-btn,select,label';
+  addEventListener('pointerover', e => {
+    if(e.target.closest && e.target.closest(HOVER)){ ring.classList.add('hover'); dot.classList.add('hover'); }
+  });
+  addEventListener('pointerout', e => {
+    const from = e.target.closest && e.target.closest(HOVER);
+    const to = e.relatedTarget && e.relatedTarget.closest && e.relatedTarget.closest(HOVER);
+    if(from && from !== to){ ring.classList.remove('hover'); dot.classList.remove('hover'); }
+  });
+  (function loop(){ rx += (mx-rx)*0.2; ry += (my-ry)*0.2;
+    ring.style.transform = 'translate('+rx+'px,'+ry+'px) translate(-50%,-50%)';
+    requestAnimationFrame(loop); })();
+})();
+
+/* ============================================================
+   ظهور البيانات بالتتابع من الأعلى للأسفل عند كل تنقّل
+   ============================================================ */
+(function initReveal(){
+  const mv = el('mainView'); if(!mv || !window.MutationObserver) return;
+  function applyReveal(n, i){
+    if(n.nodeType !== 1) return;
+    n.style.animation = 'none'; void n.offsetWidth;
+    n.style.animation = 'cardIn .5s cubic-bezier(.22,.9,.3,1) both';
+    n.style.animationDelay = Math.min(i*0.06, 0.7) + 's';
+  }
+  const DIG = ['grid','chat-wrap','mgr'];   // حاويات نفصّل داخلها بدل ظهورها ككتلة واحدة
+  let raf;
+  function stagger(){
+    let i = 0;
+    for(const n of mv.children){
+      const rows = n.querySelector && n.querySelector('tbody') ? n.querySelectorAll('tbody tr') : null;
+      if(rows && rows.length){ applyReveal(n, i++); for(const r of rows) applyReveal(r, i++); continue; }
+      const dig = n.classList && DIG.some(c => n.classList.contains(c));
+      if(dig){ for(const ch of n.children) applyReveal(ch, i++); }
+      else applyReveal(n, i++);
+    }
+  }
+  new MutationObserver(() => { clearTimeout(raf); raf = setTimeout(stagger, 0); })
+    .observe(mv, { childList:true });
+})();
 
 /* ============================================================
    auto-resume session
