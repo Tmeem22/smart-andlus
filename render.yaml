@@ -1,0 +1,14 @@
+services:
+  - type: web
+    name: smart-andlus
+    runtime: node
+    plan: free
+    buildCommand: npm install
+    startCommand: npm start
+    envVars:
+      - key: FIREWORKS_API_KEY
+        sync: false            # تُضاف يدوياً في لوحة Render (سرّية)
+      - key: FIREWORKS_MODEL
+        value: accounts/fireworks/models/glm-5p3-flash
+      - key: NODE_VERSION
+        value: "20"
