@@ -50,15 +50,16 @@ async function parseWorkbook(filePath){
     if(matched) headers[matched] = col;
     else if(raw && !KNOWN.has(n)) subjectCols.push({ col, name:raw });   // أي عمود غير معروف = مادة
   });
-  if(!headers.name) throw new Error('لم يُعثر على عمود «اسم الطالب» في الترويسة');
+  if(!headers.name && !headers.id) throw new Error('لا يوجد عمود «اسم الطالب» ولا «رقم الطالب» في الترويسة');
 
   const students = [];
   ws.eachRow((row, i) => {
     if(i === 1) return;
     const val = c => c ? row.getCell(c).value : null;
     const txt = c => { const v = val(c); return v == null ? '' : String(typeof v === 'object' && v.text ? v.text : v).trim(); };
-    const name = txt(headers.name);
-    if(!name) return;
+    const idTxt = txt(headers.id);
+    const name = txt(headers.name) || idTxt;   // ملف هويات قد لا يحوي اسماً مع الرقم
+    if(!name && !idTxt) return;
     const grades = {};
     subjectCols.forEach(({ col, name:sub }) => {
       const n = Number(val(col));
@@ -66,7 +67,7 @@ async function parseWorkbook(filePath){
     });
     const gv = Object.values(grades);
     students.push({
-      id: txt(headers.id) || 'ST' + (1000 + i),
+      id: idTxt || 'ST' + (1000 + i),
       name,
       level: txt(headers.level),
       section: txt(headers.section),
@@ -127,14 +128,42 @@ function buildIndex(students, subjects){
 }
 
 /* ---------- الاستيراد: القراءة الوحيدة ---------- */
-async function importFile(filePath, fileName){
+/* دمج طلاب واردين مع الموجودين (مطابقة بالرقم ثم الاسم) — يمكّن ملف هويات + ملفات مواد */
+function mergeStudents(existing, incoming){
+  const byId = new Map(existing.map(s => [norm(s.id), s]));
+  const byName = new Map(existing.map(s => [norm(s.name), s]));
+  incoming.forEach(n => {
+    const cur = byId.get(norm(n.id)) || byName.get(norm(n.name));
+    if(cur){
+      ['level','section','guardian','guardianId','notes'].forEach(k => { if(n[k]) cur[k] = n[k]; });
+      if(n.attendance) cur.attendance = n.attendance;
+      cur.grades = Object.assign(cur.grades || {}, n.grades || {});   // دمج الدرجات
+    } else {
+      existing.push(n); byId.set(norm(n.id), n); byName.set(norm(n.name), n);
+    }
+  });
+  return existing;
+}
+
+async function importFile(filePath, fileName, mode = 'replace'){
   const t0 = Date.now();
-  const { students, subjects } = await parseWorkbook(filePath);
-  if(!students.length) throw new Error('الملف لا يحتوي على صفوف طلاب');
+  const { students: incoming, subjects: incSubjects } = await parseWorkbook(filePath);
+  if(!incoming.length) throw new Error('الملف لا يحتوي على صفوف');
+  let students, subjects;
+  const prev = db.DB.roster;
+  if(mode === 'merge' && prev && Array.isArray(prev.students) && prev.students.length){
+    students = mergeStudents(prev.students, incoming);
+    subjects = Array.from(new Set([...(prev.subjects || []), ...incSubjects]));
+  } else {
+    students = incoming; subjects = incSubjects;
+  }
+  // إعادة حساب المعدّل بعد الدمج
+  students.forEach(s => { const g = Object.values(s.grades || {}).filter(v => typeof v === 'number');
+    s.avg = g.length ? Math.round(g.reduce((a,b)=>a+b,0)/g.length) : (s.avg || 0); });
   IDX = buildIndex(students, subjects);
   db.DB.roster = { fileName, importedAt:Date.now(), count:students.length, subjects, students, stats:IDX.stats };
   db.saveNow();
-  return { count:students.length, subjects, ms:Date.now()-t0, stats:IDX.stats };
+  return { count:students.length, subjects, ms:Date.now()-t0, mode, stats:IDX.stats };
 }
 
 /* إعادة بناء الفهرس من data.json عند إقلاع السيرفر (بدون قراءة الإكسل) */

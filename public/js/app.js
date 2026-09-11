@@ -425,10 +425,12 @@ async function renderRoster(v){
             : `<b>لم يُستورد سجل بعد</b><div class="small muted">اختر ملف .xlsx واضغط استيراد</div>`}</div>
         </div>
         <div class="flex gap wrap center">
-          <input type="file" id="rosterFile" accept=".xlsx" style="max-width:230px;padding:9px;border:1.5px solid var(--line);border-radius:12px">
-          <button class="btn gold" id="rosterImport">⬆️ استيراد وفهرسة</button>
+          <input type="file" id="rosterFile" accept=".xlsx" style="max-width:220px;padding:9px;border:1.5px solid var(--line);border-radius:12px">
+          <button class="btn gold" id="rosterReplace" title="يمسح السجل الحالي ويضع الملف الجديد بدله">⬆️ استبدال الكل</button>
+          <button class="btn" id="rosterMerge" title="يدمج الملف مع السجل الحالي (يضيف طلاب/درجات بمطابقة رقم الطالب)">＋ إضافة/دمج</button>
         </div>
       </div>
+      <p class="small muted" style="margin:10px 2px 0">💡 <b>استبدال الكل</b>: ملف كامل جديد. · <b>إضافة/دمج</b>: للهويات أولاً ثم ملفات المواد — تُدمج الدرجات بمطابقة «رقم الطالب».</p>
     </div>
     ${s ? `<div class="grid cols4 mb">
       ${stat(I.student, s.عدد_الطلاب, 'إجمالي الطلاب', '#12735a', '#e3f6ec')}
@@ -444,23 +446,26 @@ async function renderRoster(v){
       </div>
       <div id="rosterTable"><div class="empty-state small">جارٍ التحميل...</div></div>
     </div>`;
-  el('rosterImport').onclick = doImport;
+  el('rosterReplace').onclick = () => doImport('replace');
+  el('rosterMerge').onclick = () => doImport('merge');
   animateCounts();
   const sb = el('rosterSearch');
   if(sb){ let t; sb.oninput = () => { clearTimeout(t); t = setTimeout(()=>{ rosterQ = sb.value.trim(); rosterPage = 1; loadRosterTable(); }, 250); }; }
   if(info.ready) loadRosterTable();
   else el('rosterTable').innerHTML = `<div class="empty-state small">استورد ملف الإكسل أولاً</div>`;
 }
-async function doImport(){
+async function doImport(mode){
   const f = el('rosterFile').files[0];
   if(!f){ toast('اختر ملف .xlsx أولاً'); return; }
-  const btn = el('rosterImport'); btn.disabled = true; btn.textContent = '⏳ جارٍ القراءة والفهرسة...';
-  const fd = new FormData(); fd.append('file', f);
+  if(mode==='replace' && !confirm('استبدال كل السجل الحالي بهذا الملف؟')) return;
+  const rb = el('rosterReplace'), mb = el('rosterMerge');
+  rb.disabled = mb.disabled = true; (mode==='merge'?mb:rb).textContent = '⏳ جارٍ...';
+  const fd = new FormData(); fd.append('file', f); fd.append('mode', mode);
   try{
     const r = await api('/api/roster/import', { method:'POST', form:fd });
-    toast(`تمت فهرسة ${r.count} طالب في ${r.ms}ms — البوت حفظهم ✅`);
+    toast(`${mode==='merge'?'تم الدمج':'تم الاستبدال'} — ${r.count} طالب في ${r.ms}ms ✅`);
     rosterPage = 1; rosterQ = ''; go('roster');
-  }catch(e){ toast(e.message); btn.disabled = false; btn.textContent = '⬆️ استيراد وفهرسة'; }
+  }catch(e){ toast(e.message); rb.disabled = mb.disabled = false; go('roster'); }
 }
 async function loadRosterTable(){
   const box = el('rosterTable'); if(!box) return;

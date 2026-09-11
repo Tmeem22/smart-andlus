@@ -288,8 +288,9 @@ app.get('/api/roster/search', auth, (req,res)=>{
 app.post('/api/roster/import', auth, requireRole('admin'), upload.single('file'), async (req,res)=>{
   if(!req.file) return res.status(400).json({ error:'اختر ملف إكسل (.xlsx)' });
   const full = path.join(UPLOAD_DIR, req.file.filename);
+  const mode = (req.body && req.body.mode === 'merge') ? 'merge' : 'replace';
   try{
-    const out = await roster.importFile(full, req.file.originalname);
+    const out = await roster.importFile(full, req.file.originalname, mode);
     db.DB.files.push({ id:'f'+Date.now(), owner:req.user.id, ownerName:req.user.name, subject:'سجل الطلاب',
       name:req.file.originalname, status:'approved', mime:req.file.mimetype, path:'uploads/'+req.file.filename,
       content:`سجل طلاب مفهرس: ${out.count} طالب — تمت القراءة مرة واحدة عند الاستيراد.`, ts:Date.now() });
