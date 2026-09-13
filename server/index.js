@@ -91,6 +91,28 @@ function pruneParents(){
 }
 const avgOf = s => { const g = Object.values((s && s.grades) || {}).filter(v=>typeof v==='number');
   return g.length ? Math.round(g.reduce((a,b)=>a+b,0)/g.length) : 0; };
+/* اسم الملف العربي يصل من multer مفكوكاً بـ latin1 → نعيده UTF-8 */
+function fixName(s){
+  const t = String(s == null ? '' : s);
+  if(!t || /[؀-ۿ]/.test(t)) return t;          // فيه عربي سليم أصلاً
+  if(!/[À-ÿ]/.test(t)) return t;               // لا يبدو مشوّهاً
+  try{
+    const fixed = Buffer.from(t, 'latin1').toString('utf8');
+    if(/[؀-ۿ]/.test(fixed)) return fixed;
+  }catch(_){}
+  return t;
+}
+/* إصلاح لمرّة واحدة للأسماء المخزَّنة مشوّهة قبل هذا التصحيح */
+function repairNames(){
+  let n = 0;
+  (db.DB.files||[]).forEach(f=>{ const v = fixName(f.name); if(v !== f.name){ f.name = v; n++; } });
+  if(db.DB.roster && db.DB.roster.fileName){
+    const v = fixName(db.DB.roster.fileName);
+    if(v !== db.DB.roster.fileName){ db.DB.roster.fileName = v; n++; }
+  }
+  if(n) db.saveNow();
+  return n;
+}
 /* حذف نسخة الملف من القرص (بهدوء) — كي لا تتضخّم uploads بملفات بلا سجل */
 function rmUpload(p){
   if(!p) return;
@@ -361,7 +383,7 @@ app.post('/api/roster/analyze', auth, requireRole('admin'), upload.single('file'
   const full = path.join(UPLOAD_DIR, req.file.filename);
   try{
     const out = await agent.analyzeSheet(full);
-    res.json({ ok:true, ...out, tmp:req.file.filename, fileName:req.file.originalname });
+    res.json({ ok:true, ...out, tmp:req.file.filename, fileName:fixName(req.file.originalname) });
   }catch(e){
     try{ fs.unlinkSync(full); }catch(_){}
     res.status(400).json({ error:'تعذّر تحليل الملف: ' + e.message });
@@ -374,10 +396,18 @@ app.post('/api/roster/import', auth, requireRole('admin'), upload.single('file')
   const mode = (req.body && req.body.mode === 'merge') ? 'merge' : 'replace';
   let mapping = null;
   try{ if(req.body && req.body.mapping) mapping = JSON.parse(req.body.mapping); }catch(_){}
+  const origName = fixName(req.file.originalname);
   try{
-    const out = await roster.importFile(full, req.file.originalname, mode, mapping);
+    const out = await roster.importFile(full, origName, mode, mapping);
+    // «استبدال الكل» يستبدل بطاقة السجل أيضاً — لا نترك بطاقات لسجلات لم تعد قائمة
+    if(mode === 'replace'){
+      db.DB.files = db.DB.files.filter(f=>{
+        if(f.subject !== 'سجل الطلاب') return true;
+        rmUpload(f.path); return false;
+      });
+    }
     db.DB.files.push({ id:'f'+Date.now(), owner:req.user.id, ownerName:req.user.name, subject:'سجل الطلاب',
-      name:req.file.originalname, status:'approved', mime:req.file.mimetype, path:'uploads/'+req.file.filename,
+      name:origName, status:'approved', mime:req.file.mimetype, path:'uploads/'+req.file.filename,
       content:`سجل طلاب مفهرس: ${out.count} طالب — تمت القراءة مرة واحدة عند الاستيراد.`, ts:Date.now() });
     db.saveNow();
     res.json({ ok:true, ...out });
@@ -509,16 +539,17 @@ app.post('/api/files', auth, requireRole('teacher','admin'), requirePerm('files'
   const b = req.body || {};
   const isBrain = b.brain === '1';
   const subject = req.user.role==='teacher' ? req.user.subject : (b.subject || (isBrain?'عقل البوت':SUBJECTS[0]));
-  let name = b.name || (req.file && req.file.originalname) || 'ملف';
+  const orig = req.file ? fixName(req.file.originalname) : '';
+  let name = b.name || orig || 'ملف';
   let content = b.content || '';
   let mime = 'text/plain', filePath = null;
   if(req.file){
     mime = req.file.mimetype || 'application/octet-stream';
     filePath = 'uploads/' + req.file.filename;
-    name = b.name || req.file.originalname;
+    name = b.name || orig;
     // استخراج النص (نصوص + إكسل + PDF + Word) ليقرأه البوت
     // نستخدم اسم الملف الأصلي (فيه الامتداد) لا الاسم المعروض
-    const got = await extract.extractText(path.join(UPLOAD_DIR, req.file.filename), req.file.originalname || name, mime);
+    const got = await extract.extractText(path.join(UPLOAD_DIR, req.file.filename), orig || name, mime);
     if(got) content = got;
   }
   const f = {
@@ -662,6 +693,8 @@ io.on('connection', (socket)=>{
 (async () => {
   try { await db.init(); }               // Mongo (دائم) أو ملف محلي
   catch(e){ console.error('فشل الاتصال بقاعدة البيانات:', e.message); process.exit(1); }
+  const fixedN = repairNames();            // إصلاح أسماء الملفات العربية المخزَّنة مشوّهة
+  if(fixedN) console.log('أُصلح اسم '+fixedN+' ملف (ترميز عربي)');
   roster.hydrate();                        // إعادة بناء الفهرس من الحالة المحمّلة
   server.listen(PORT, ()=>{
     console.log('ذكاء الأندلس يعمل: http://localhost:'+PORT);

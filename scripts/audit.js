@@ -84,6 +84,18 @@ async function waitUp(ms = 20000){
     st = (await req('GET', '/api/roster/stats', { token:A })).json;
     stu = (await req('GET', '/api/students', { token:A })).json;
     check('«سجل الطلاب» يقول 300', st.ready && st.count === 300, String(st.count));
+    check('اسم الملف العربي يظهر سليماً (لا ترميز مشوّه)',
+      /[؀-ۿ]/.test(st.fileName || '') && !/[À-ÿ]/.test(st.fileName || ''), st.fileName);
+
+    /* استيراد ثانٍ بوضع «استبدال» لا يترك بطاقة مكرّرة */
+    const fdDup = new FormData();
+    fdDup.append('file', new Blob([fs.readFileSync(ROSTER)]), 'سجل-الطلاب-300.xlsx');
+    fdDup.append('mode', 'replace');
+    await req('POST', '/api/roster/import', { token:A, form:fdDup });
+    const dupFiles = (await req('GET', '/api/files', { token:A })).json.files;
+    check('«استبدال الكل» لا يكرّر بطاقة السجل',
+      dupFiles.filter(f => f.subject === 'سجل الطلاب').length === 1,
+      String(dupFiles.filter(f => f.subject === 'سجل الطلاب').length));
     check('«الطلاب» يقول 300 أيضاً (لا تناقض)', stu.students.length === 300, String(stu.students.length));
     check('«الطلاب» يميّز مصدر السجل', stu.rosterCount === 300 && stu.manualCount === 0,
       `roster=${stu.rosterCount} manual=${stu.manualCount}`);
