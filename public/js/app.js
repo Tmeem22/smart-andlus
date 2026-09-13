@@ -20,8 +20,9 @@ async function api(path, { method='GET', body, form } = {}){
   if(form){ payload = form; }
   else if(body){ headers['Content-Type'] = 'application/json'; payload = JSON.stringify(body); }
   const res = await fetch(path, { method, headers, body: payload });
-  if(res.status === 401){ doLogout(true); throw new Error('انتهت الجلسة'); }
   const j = await res.json().catch(()=> ({}));
+  // نخرج المستخدم فقط إذا بطلت جلسته — لا لمجرد أن ردّ ما كان 401
+  if(res.status === 401 && j.code === 'session'){ doLogout(true); throw new Error('انتهت الجلسة'); }
   if(!res.ok) throw new Error(j.error || ('خطأ ' + res.status));
   return j;
 }
@@ -39,6 +40,7 @@ const I = {
   send:'<svg viewBox="0 0 24 24" fill="currentColor"><path d="M3.4 20.4 21 12 3.4 3.6l0 6.5L15 12 3.4 13.9z"/></svg>',
   phone:'<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M22 16.9v3a2 2 0 0 1-2.2 2 19.8 19.8 0 0 1-8.6-3 19.5 19.5 0 0 1-6-6 19.8 19.8 0 0 1-3-8.6A2 2 0 0 1 4.1 2h3a2 2 0 0 1 2 1.7c.1 1 .4 1.9.7 2.8a2 2 0 0 1-.5 2.1L8.1 9.9a16 16 0 0 0 6 6l1.3-1.3a2 2 0 0 1 2.1-.5c.9.3 1.8.6 2.8.7a2 2 0 0 1 1.7 2Z"/></svg>',
   logo:'<svg viewBox="0 0 24 24" fill="none"><path d="M12 2 3 6.5v5c0 5 3.8 8.9 9 10.5 5.2-1.6 9-5.5 9-10.5v-5L12 2Z" fill="#0d5c46"/><path d="M12 6.5 8 9v4l4 2.2L16 13V9l-4-2.5Z" fill="#c9a227"/></svg>',
+  lock:'<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><rect x="3" y="11" width="18" height="11" rx="2"/><path d="M7 11V7a5 5 0 0 1 10 0v4"/></svg>',
 };
 const SUBJECTS = ['الرياضيات','العلوم','اللغة العربية','اللغة الإنجليزية','الدراسات الإسلامية','الاجتماعيات'];
 const PERMS = { files:'رفع الملفات', students:'إدارة الطلاب', teachers:'إدارة المعلمين', grades:'تعديل الدرجات', messages:'المراسلة' };
@@ -155,8 +157,9 @@ async function doLogin(){
   }
   const btn = el('lgBtn'); btn.disabled = true; btn.textContent = '...جارٍ الدخول';
   try{
-    const { token, me } = await api('/api/login', { method:'POST', body });
-    TOKEN = token; ME = me; localStorage.setItem('andlus_token', token);
+    const { token, me, mustChangePass } = await api('/api/login', { method:'POST', body });
+    TOKEN = token; ME = me; ME.mustChangePass = !!mustChangePass;
+    localStorage.setItem('andlus_token', token);
     enterApp();
   }catch(e){ el('lgErr').textContent = e.message; btn.disabled = false; btn.textContent = 'تسجيل الدخول'; }
 }
@@ -211,7 +214,7 @@ async function enterApp(){
 const NAV = {
   parent:[{ id:'chat', t:'المساعد الذكي', ic:I.chat }, { id:'children', t:'أبنائي', ic:I.student }],
   teacher:[{ id:'chat', t:'المساعد الذكي', ic:I.chat }, { id:'tfiles', t:'ملفات مادتي', ic:I.files }, { id:'messages', t:'المراسلة', ic:I.msg }],
-  admin:[{ id:'dash', t:'الرئيسية', ic:I.home }, { id:'chat', t:'المساعد الذكي', ic:I.chat }, { id:'roster', t:'سجل الطلاب', ic:I.student }, { id:'teachers', t:'المعلمون', ic:I.teacher }, { id:'students', t:'الطلاب', ic:I.student }, { id:'afiles', t:'مركز الملفات', ic:I.files }, { id:'brain', t:'عقل البوت', ic:I.bot }, { id:'messages', t:'المراسلة', ic:I.msg }],
+  admin:[{ id:'dash', t:'الرئيسية', ic:I.home }, { id:'chat', t:'المساعد الذكي', ic:I.chat }, { id:'roster', t:'سجل الطلاب', ic:I.student }, { id:'teachers', t:'المعلمون', ic:I.teacher }, { id:'students', t:'الطلاب', ic:I.student }, { id:'afiles', t:'مركز الملفات', ic:I.files }, { id:'brain', t:'عقل البوت', ic:I.bot }, { id:'messages', t:'المراسلة', ic:I.msg }, { id:'account', t:'الأمان', ic:I.lock }],
 };
 let CUR = '';
 /* قائمة الدور بعد تطبيق صلاحيات المدير على المعلم (لا نعرض خانة ممنوعة) */
@@ -252,7 +255,7 @@ function go(id){
   document.querySelectorAll('.nav-item').forEach(n => n.classList.toggle('active', n.dataset.id === id));
   moveNavIndicator();
   const v = el('mainView'); v.dataset.filt = '';
-  const map = { chat:renderChat, children:renderChildren, tfiles:renderTeacherFiles, messages:renderMessages, dash:renderDash, teachers:renderTeachers, students:renderStudents, afiles:renderAdminFiles, brain:renderBrain, roster:renderRoster };
+  const map = { chat:renderChat, children:renderChildren, tfiles:renderTeacherFiles, messages:renderMessages, dash:renderDash, teachers:renderTeachers, students:renderStudents, afiles:renderAdminFiles, brain:renderBrain, roster:renderRoster, account:renderAccount };
   v.innerHTML = '<div class="empty-state">'+I.bot+'<p>جارٍ التحميل...</p></div>';
   v.classList.remove('view-in'); void v.offsetWidth; v.classList.add('view-in');
   const fn = map[id] || (()=> { v.innerHTML=''; });
@@ -894,6 +897,12 @@ async function renderDash(v){
   const [{ teachers }, { students }, { files }] = await Promise.all([ api('/api/teachers'), api('/api/students'), api('/api/files') ]);
   const pend = files.filter(f=>f.status==='pending').length;
   v.innerHTML = `<div class="page-head"><h2>لوحة المدير</h2><p>مرحباً ${esc(ME.name)} — نظرة عامة على المنصة</p></div>
+    ${ME.mustChangePass ? `<div class="card card-pad mb" style="border-color:#c0392b;background:#fdecea">
+      <div class="flex between center wrap gap">
+        <div><b style="color:#c0392b">غيّر كلمة مرورك</b>
+          <div class="small" style="margin-top:3px">حسابك ما زال على كلمة المرور الأولى، والموقع منشور على الإنترنت.</div></div>
+        <button class="btn danger" onclick="go('account')">فتح الأمان</button>
+      </div></div>` : ''}
     <div class="grid cols4 mb">
       ${stat(I.teacher, teachers.length, 'المعلمون', '#12735a', '#e3f6ec')}
       ${stat(I.student, students.length, 'الطلاب', '#b8901c', '#fff5e0')}
@@ -1049,6 +1058,92 @@ async function renderAdminFiles(v){
 function filterFiles(k){ const v = el('mainView'); v.dataset.filt = k; renderAdminFiles(v); }
 
 /* ============================================================
+   ADMIN — الأمان: كلمة مرور المدير + كلمات مرور المعلمين
+   ============================================================ */
+function passHint(p, min){
+  const s = String(p||'');
+  if(!s) return { ok:false, txt:'' };
+  if(s.length < min)   return { ok:false, txt:`قصيرة — ${min} خانات فأكثر` };
+  if(/^\d+$/.test(s))  return { ok:false, txt:'أرقام فقط سهلة التخمين — أضف حروفاً' };
+  const strong = s.length >= 12 && /[A-Za-z؀-ۿ]/.test(s) && /\d/.test(s);
+  return { ok:true, txt: strong ? 'قوية ✅' : 'مقبولة — الأطول أقوى' };
+}
+function bindPassHint(inputId, hintId, min){
+  const i = el(inputId), h = el(hintId); if(!i || !h) return;
+  i.oninput = () => {
+    const r = passHint(i.value, min);
+    h.textContent = r.txt;
+    h.style.color = i.value ? (r.ok ? 'var(--green)' : '#c0392b') : 'var(--muted)';
+  };
+}
+async function renderAccount(v){
+  const { teachers } = await api('/api/teachers');
+  const weak = ME.mustChangePass;
+  v.innerHTML = `<div class="page-head"><h2>الأمان 🔒</h2><p>غيّر كلمة مرورك، وأعد تعيين كلمات مرور المعلمين عند الحاجة</p></div>
+    ${weak ? `<div class="card card-pad mb" style="border-color:#c0392b;background:#fdecea">
+      <b style="color:#c0392b">حسابك ما زال على كلمة المرور الأولى</b>
+      <div class="small" style="margin-top:4px">الموقع منشور على الإنترنت — أي شخص يعرف هذه الكلمة يدخل كمدير ويطّلع على بيانات الطلاب ويحذفها. غيّرها الآن قبل رفع أي بيانات حقيقية.</div>
+    </div>` : ''}
+
+    <div class="card card-pad mb">
+      <h3 style="margin:0 0 12px">كلمة مرور حسابي — ${esc(ME.name)}</h3>
+      <div class="grid cols2">
+        <div class="field"><label>كلمة المرور الحالية</label><input id="pwCur" type="password" autocomplete="current-password" placeholder="••••••••"></div>
+        <div class="field"><label>كلمة المرور الجديدة (8 خانات فأكثر)</label><input id="pwNew" type="password" autocomplete="new-password" placeholder="حروف وأرقام"><div class="small" id="pwHint" style="margin-top:4px;color:var(--muted)"></div></div>
+      </div>
+      <div class="field"><label>تأكيد كلمة المرور الجديدة</label><input id="pwNew2" type="password" autocomplete="new-password" placeholder="أعد كتابتها"></div>
+      <div class="err" id="pwErr"></div>
+      <button class="btn" id="pwSave">حفظ كلمة المرور</button>
+      <p class="small muted" style="margin:10px 2px 0">بعد الحفظ تُغلق أي جلسة أخرى مفتوحة بحسابك على أي جهاز، وتبقى جلستك الحالية.</p>
+    </div>
+
+    <div class="card card-pad">
+      <h3 style="margin:0 0 4px">كلمات مرور المعلمين</h3>
+      <p class="small muted" style="margin:0 0 12px">تعيين كلمة جديدة لا يحتاج معرفة القديمة. المعلّم يخرج من جلساته ويدخل بالجديدة.</p>
+      ${teachers.length ? `<div class="tbl-wrap"><table><thead><tr><th>الاسم</th><th>المادة</th><th>اسم الدخول</th><th></th></tr></thead><tbody>
+        ${teachers.map(t=>`<tr><td><b>${esc(t.name)}</b></td><td><span class="chip">${esc(t.subject||'')}</span></td><td>${esc(t.user)}</td>
+          <td><button class="btn ghost sm" onclick='setTeacherPass(${esc(JSON.stringify({id:t.id,name:t.name,user:t.user}))})'>🔑 تعيين كلمة مرور</button></td></tr>`).join('')}
+      </tbody></table></div>` : emptyBox('لا يوجد معلمون بعد — أضفهم من خانة «المعلمون».')}
+    </div>`;
+  bindPassHint('pwNew','pwHint',8);
+  el('pwSave').onclick = savePassword;
+}
+async function savePassword(){
+  const cur = el('pwCur').value, nw = el('pwNew').value, nw2 = el('pwNew2').value;
+  const err = el('pwErr'); err.textContent = '';
+  if(!cur){ err.textContent = 'أدخل كلمة المرور الحالية.'; return; }
+  const chk = passHint(nw, 8);
+  if(!nw || !chk.ok){ err.textContent = chk.txt || 'أدخل كلمة مرور جديدة.'; return; }
+  if(nw !== nw2){ err.textContent = 'التأكيد لا يطابق كلمة المرور الجديدة.'; return; }
+  const b = el('pwSave'); b.disabled = true; b.textContent = 'يحفظ...';
+  try{
+    const r = await api('/api/account/password', { method:'POST', body:{ current:cur, next:nw } });
+    ME.mustChangePass = false;
+    toast(r.closedSessions ? `تم تغيير كلمة المرور ✅ وأُغلقت ${r.closedSessions} جلسة أخرى` : 'تم تغيير كلمة المرور ✅');
+    go('account');
+  }catch(e){ err.textContent = e.message; b.disabled = false; b.textContent = 'حفظ كلمة المرور'; }
+}
+function setTeacherPass(t){
+  modal('كلمة مرور — ' + t.name, `
+    <p class="small muted" style="margin:0 0 12px">اسم الدخول: <b>${esc(t.user)}</b> · سلّمه الكلمة الجديدة بنفسك، ولا ترسلها في مكان عام.</p>
+    <div class="field"><label>كلمة المرور الجديدة (6 خانات فأكثر)</label><input id="tpNew" type="password" autocomplete="new-password" placeholder="حروف وأرقام"><div class="small" id="tpHint" style="margin-top:4px;color:var(--muted)"></div></div>
+    <div class="field"><label>تأكيد كلمة المرور</label><input id="tpNew2" type="password" autocomplete="new-password" placeholder="أعد كتابتها"></div>
+    <div class="err" id="tpErr"></div>`,
+    [{ t:'تعيين', cls:'btn', fn: async () => {
+      const nw = el('tpNew').value, nw2 = el('tpNew2').value, err = el('tpErr');
+      err.textContent = '';
+      const chk = passHint(nw, 6);
+      if(!nw || !chk.ok){ err.textContent = chk.txt || 'أدخل كلمة مرور.'; return; }
+      if(nw !== nw2){ err.textContent = 'التأكيد لا يطابق.'; return; }
+      try{
+        await api('/api/teachers/'+t.id+'/password', { method:'POST', body:{ next:nw } });
+        closeModal(); toast('تم تعيين كلمة مرور ' + t.name + ' ✅');
+      }catch(e){ err.textContent = e.message; }
+    }}, { t:'إلغاء', cls:'btn ghost', fn:closeModal }]);
+  bindPassHint('tpNew','tpHint',6);
+}
+
+/* ============================================================
    ADMIN — bot brain
    ============================================================ */
 async function renderBrain(v){
@@ -1192,7 +1287,7 @@ function timeAgo(ts){ const d=(Date.now()-ts)/1000; if(d<60)return'الآن'; if
 /* expose for inline onclick */
 function setChild(id){ activeChild = id; go('chat'); }
 Object.assign(window, { go, viewFile, filterFiles, openTeacher, delTeacher, openStudent, delStudent, studGo,
-  delFile, clearRoster, openThread, sendMsg, closeModal, setChild, rosterGo, openConvo, delConvo });
+  delFile, clearRoster, setTeacherPass, openThread, sendMsg, closeModal, setChild, rosterGo, openConvo, delConvo });
 
 /* ============================================================
    مؤشّر مخصّص — نقطة دقيقة + حلقة تتبع بتأخير، تكبر على العناصر
@@ -1259,7 +1354,7 @@ Object.assign(window, { go, viewFile, filterFiles, openTeacher, delTeacher, open
    ============================================================ */
 (async function init(){
   if(TOKEN){
-    try{ const { me } = await api('/api/me'); ME = me; enterApp(); }
+    try{ const { me, mustChangePass } = await api('/api/me'); ME = me; ME.mustChangePass = !!mustChangePass; enterApp(); }
     catch(e){ localStorage.removeItem('andlus_token'); TOKEN = null; }
   }
 })();

@@ -324,7 +324,68 @@ async function waitUp(ms = 20000){
     const afterLo = await req('GET', '/api/me', { token:TC });
     check('التوكن يبطل بعد الخروج', afterLo.status === 401, 'status ' + afterLo.status);
 
-    /* ---------- 16. إعادة التعيين تمسح كل شيء ---------- */
+    /* ---------- 16. تغيير كلمات المرور ---------- */
+    const meA = await req('GET', '/api/me', { token:A });
+    check('المنصة تنبّه أن كلمة مرور المدير هي الأولى', meA.json.mustChangePass === true, JSON.stringify(meA.json.mustChangePass));
+
+    const wrongCur = await req('POST', '/api/account/password', { token:A, body:{ current:'غلط', next:'AndlusPass2026' } });
+    check('كلمة مرور حالية خاطئة تُرفض', wrongCur.status === 401, 'status ' + wrongCur.status);
+    check('خطأ كلمة المرور لا يُعَدّ انتهاء جلسة (لا يُخرج المستخدم)',
+      !(wrongCur.json && wrongCur.json.code === 'session'), JSON.stringify(wrongCur.json));
+    check('الجلسة باقية بعد محاولة خاطئة', (await req('GET', '/api/me', { token:A })).status === 200);
+    const expired = await req('GET', '/api/me', { token:'z'.repeat(40) });
+    check('انتهاء الجلسة يُعلَّم بـ code:session', expired.json && expired.json.code === 'session', JSON.stringify(expired.json));
+    const shortPw = await req('POST', '/api/account/password', { token:A, body:{ current:'43321', next:'abc12' } });
+    check('كلمة مرور جديدة قصيرة تُرفض', shortPw.status === 400, shortPw.json && shortPw.json.error);
+    const digitsPw = await req('POST', '/api/account/password', { token:A, body:{ current:'43321', next:'12345678901' } });
+    check('كلمة مرور أرقام فقط تُرفض', digitsPw.status === 400, digitsPw.json && digitsPw.json.error);
+
+    /* جلسة ثانية للمدير — لا بد أن تُغلق بعد التغيير */
+    const A2nd = (await req('POST', '/api/login', { body:{ role:'admin', user:'naif', pass:'43321' } })).json.token;
+    const okPw = await req('POST', '/api/account/password', { token:A, body:{ current:'43321', next:'AndlusPass2026' } });
+    check('المدير يغيّر كلمة مروره', okPw.status === 200, 'status ' + okPw.status + ' ' + (okPw.json && okPw.json.error || ''));
+    check('الجلسات الأخرى تُغلق بعد التغيير', okPw.json.closedSessions >= 1, String(okPw.json.closedSessions));
+    check('جلسة المدير الثانية أُبطلت فعلاً', (await req('GET', '/api/me', { token:A2nd })).status === 401);
+    check('جلسة المدير الحالية باقية', (await req('GET', '/api/me', { token:A })).status === 200);
+    check('الدخول بالكلمة القديمة يفشل',
+      (await req('POST', '/api/login', { body:{ role:'admin', user:'naif', pass:'43321' } })).status === 401);
+    const newLogin = await req('POST', '/api/login', { body:{ role:'admin', user:'naif', pass:'AndlusPass2026' } });
+    check('الدخول بالكلمة الجديدة ينجح', newLogin.status === 200, 'status ' + newLogin.status);
+    check('التنبيه اختفى بعد التغيير', newLogin.json.mustChangePass === false, JSON.stringify(newLogin.json.mustChangePass));
+    const A3 = newLogin.json.token;
+
+    /* المدير يعيّن كلمة مرور معلّم */
+    const tp = await req('POST', '/api/teachers', { token:A3,
+      body:{ name:'معلم كلمة مرور', user:'tpw', pass:'audit-pass-2026', perms:['files'] } });
+    const tpId = tp.json.teacher.id;
+    const TPW = (await req('POST', '/api/login', { body:{ role:'teacher', user:'tpw', pass:'audit-pass-2026' } })).json.token;
+    const setPw = await req('POST', '/api/teachers/' + tpId + '/password', { token:A3, body:{ next:'MoallemPass9' } });
+    check('المدير يعيّن كلمة مرور معلّم', setPw.status === 200, 'status ' + setPw.status + ' ' + (setPw.json && setPw.json.error || ''));
+    check('جلسة المعلّم تُغلق بعد تغيير كلمته', (await req('GET', '/api/me', { token:TPW })).status === 401);
+    check('المعلّم يدخل بالكلمة الجديدة',
+      (await req('POST', '/api/login', { body:{ role:'teacher', user:'tpw', pass:'MoallemPass9' } })).status === 200);
+    check('المعلّم لا يدخل بالقديمة',
+      (await req('POST', '/api/login', { body:{ role:'teacher', user:'tpw', pass:'audit-pass-2026' } })).status === 401);
+
+    /* لا أحد غير المدير يغيّر كلمات المرور */
+    const TX = (await req('POST', '/api/login', { body:{ role:'teacher', user:'tpw', pass:'MoallemPass9' } })).json.token;
+    check('المعلّم ممنوع من تغيير كلمة مرور غيره',
+      (await req('POST', '/api/teachers/' + tpId + '/password', { token:TX, body:{ next:'Hacked12345' } })).status === 403);
+    check('المعلّم ممنوع من نقطة كلمة مرور المدير',
+      (await req('POST', '/api/account/password', { token:TX, body:{ current:'x', next:'Hacked12345' } })).status === 403);
+    /* جلسة وليّ أمر صالحة الآن (جلسة الخطوة 11 أُغلقت مع مسح السجل) */
+    const liveRow = (await req('GET', '/api/roster/search?q=&page=1&per=1', { token:A3 })).json.rows[0];
+    const PT2 = liveRow ? (await req('POST', '/api/login',
+      { body:{ role:'parent', idType:'guardian', identifier:liveRow.guardianId } })).json.token : null;
+    check('جلسة وليّ أمر صالحة للاختبار', !!PT2, 'لا صف في السجل');
+    check('وليّ الأمر ممنوع من تغيير كلمات المرور',
+      (await req('POST', '/api/teachers/' + tpId + '/password', { token:PT2, body:{ next:'Hacked12345' } })).status === 403);
+    check('وليّ الأمر ممنوع من نقطة كلمة مرور المدير',
+      (await req('POST', '/api/account/password', { token:PT2, body:{ current:'x', next:'Hacked12345' } })).status === 403);
+    check('بلا توكن ممنوع من تغيير كلمات المرور',
+      (await req('POST', '/api/account/password', { body:{ current:'x', next:'Hacked12345' } })).status === 401);
+
+    /* ---------- 17. إعادة التعيين تمسح كل شيء ---------- */
     await req('POST', '/api/roster/import', { token:A, form:(()=>{ const f=new FormData();
       f.append('file', new Blob([fs.readFileSync(ROSTER)]), 'سجل-اختبار.xlsx'); f.append('mode','replace'); return f; })() });
     await req('POST', '/api/reset', { token:A });

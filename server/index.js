@@ -54,7 +54,9 @@ function auth(req,res,next){
   const h = req.headers.authorization || '';
   const t = h.startsWith('Bearer ') ? h.slice(7) : (req.query.t || '');
   const u = userFromToken(t);
-  if(!u) return res.status(401).json({ error:'غير مصرّح' });
+  // code:'session' يميّز «انتهت الجلسة» عن 401 لسبب آخر (كلمة مرور حالية خاطئة مثلاً)
+  // بدونه كانت الواجهة تُخرج المستخدم من الموقع عند أي 401
+  if(!u) return res.status(401).json({ error:'غير مصرّح', code:'session' });
   req.user = u; req.token = t; next();
 }
 function requireRole(...roles){ return (req,res,next)=> roles.includes(req.user.role) ? next() : res.status(403).json({ error:'ممنوع' }); }
@@ -164,9 +166,9 @@ app.post('/api/login', (req,res)=>{
   const u = db.DB.users.find(x=>x.user===user && x.role===role);
   if(!u || !verifyPw(pass, u.pass)) return res.status(401).json({ error:'بيانات الدخول غير صحيحة لهذا الدور.' });
   const token = newToken(u.id);
-  res.json({ token, me: publicUser(u) });
+  res.json({ token, me: publicUser(u), mustChangePass: usingDefaultPass(u) });
 });
-app.get('/api/me', auth, (req,res)=> res.json({ me: publicUser(req.user) }));
+app.get('/api/me', auth, (req,res)=> res.json({ me: publicUser(req.user), mustChangePass: usingDefaultPass(req.user) }));
 app.post('/api/logout', auth, (req,res)=>{ delete db.DB.tokens[req.token]; saveDB(); res.json({ ok:true }); });
 
 /* ============================================================
@@ -672,6 +674,59 @@ app.post('/api/messages/clear', auth, requireRole('admin'), (req,res)=>{
   db.DB.threads = {}; db.DB.notifs = {};
   db.saveNow();
   res.json({ ok:true, cleared:n });
+});
+
+/* ============================================================
+   الأمان — المدير يغيّر كلمة مروره (وكلمات المعلمين عبر /api/teachers)
+   ============================================================ */
+const DEFAULT_ADMIN_PASS = '43321';
+/* هل ما زال المدير على كلمة المرور الأولى؟ (لتنبيهه في اللوحة) */
+function usingDefaultPass(u){
+  return !!(u && u.role === 'admin' && verifyPw(DEFAULT_ADMIN_PASS, u.pass));
+}
+/* قواعد واحدة لكل كلمات المرور في المنصة */
+function passProblem(p, { min = 8 } = {}){
+  const s = String(p == null ? '' : p);
+  if(s.length < min) return `كلمة المرور قصيرة — ${min} خانات فأكثر.`;
+  if(/^\d+$/.test(s)) return 'أرقام فقط سهلة التخمين — أضف حروفاً.';
+  if(s === DEFAULT_ADMIN_PASS) return 'هذه هي كلمة المرور الأولى — اختر غيرها.';
+  return null;
+}
+
+app.post('/api/account/password', auth, requireRole('admin'), (req,res)=>{
+  const { current, next } = req.body || {};
+  const u = db.DB.users.find(x=>x.id===req.user.id);
+  if(!u) return res.status(404).json({ error:'الحساب غير موجود' });
+  if(!verifyPw(String(current || ''), u.pass))
+    return res.status(401).json({ error:'كلمة المرور الحالية غير صحيحة.' });
+  const bad = passProblem(next);
+  if(bad) return res.status(400).json({ error:bad });
+  if(verifyPw(String(next), u.pass))
+    return res.status(400).json({ error:'الجديدة مطابقة للحالية.' });
+  u.pass = hashPw(String(next));
+  // أي جلسة أخرى لهذا الحساب تُغلق — لو كان أحد داخلاً بالقديمة يخرج فوراً
+  let closed = 0;
+  Object.entries(db.DB.tokens).forEach(([tok,uid])=>{
+    if(uid === u.id && tok !== req.token){ delete db.DB.tokens[tok]; closed++; }
+  });
+  db.saveNow();
+  res.json({ ok:true, closedSessions:closed });
+});
+
+/* المدير يعيّن كلمة مرور معلّم (بدون معرفة القديمة) ويُخرج جلساته */
+app.post('/api/teachers/:id/password', auth, requireRole('admin'), (req,res)=>{
+  const t = db.DB.users.find(u=>u.id===req.params.id && u.role==='teacher');
+  if(!t) return res.status(404).json({ error:'المعلّم غير موجود' });
+  const bad = passProblem(req.body && req.body.next, { min:6 });
+  if(bad) return res.status(400).json({ error:bad });
+  t.pass = hashPw(String(req.body.next));
+  let closed = 0;
+  Object.entries(db.DB.tokens).forEach(([tok,uid])=>{
+    if(uid === t.id){ delete db.DB.tokens[tok]; closed++; }
+  });
+  db.saveNow();
+  pushNotif(t.id, 'غيّر المدير كلمة مرورك', 'سجّل الدخول بالكلمة الجديدة');
+  res.json({ ok:true, closedSessions:closed });
 });
 
 /* إعادة تعيين كاملة: البيانات + السجل المفهرس + ملفات القرص (لا يبقى أثر متناقض) */
