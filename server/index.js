@@ -200,24 +200,16 @@ function resolveChat(user, body){
     const s = findStudentAny(sid);
     if(!s || !(user.children||[]).includes(sid)) return { error:'الطالب غير موجود' };
     const avg = avgOf(s);
-    return { message, key:user.id+':'+sid, system:llm.promptForParent(clientStudent(s), avg, message), student:clientStudent(s), avg };
+    return { message, role:user.role, key:user.id+':'+sid, system:llm.promptForParent(clientStudent(s), avg, message), student:clientStudent(s), avg };
   }
   // مدير / معلم: بحث فوري في الفهرس
   const hit = roster.ready() ? roster.findStudents(message, 1)[0] : null;
-  return { message, key:user.id+':school', system:llm.promptForSchool(message),
+  return { message, role:user.role, key:user.id+':school', system:llm.promptForSchool(message),
     student:clientStudent(hit), avg: hit ? hit.avg : null };
 }
 
-/* كشف نيّة الطلب من نصّ السائل — يجبر الأداة حتى لو لم يُصدر النموذج الرمز */
-function intentFlags(msg){
-  const t = String(msg||'');
-  return {
-    chart:  /رسم|بياني|بيان|مخطط|رسمه|رسمة|chart|graph|قارن|مقارنة/i.test(t),
-    donut:  /حضور|غياب|مواظبة|دوام|attendance/i.test(t),
-    report: /تقرير|كشف\s*كامل|كشف\s*شامل|report/i.test(t),
-    top:    /أفضل|افضل|أعلى|اعلى|ترتيب|متفوق|أوائل|اوائل/i.test(t),
-  };
-}
+/* كشف نيّة الطلب — في server/intent.js ليُختبر وحده */
+const { intentFlags } = require('./intent');
 
 /* يمنع تفعيل أداة بصرية بلا بيانات تسندها + يجبرها عند طلب السائل صراحةً */
 function buildDone(full, ctx){
@@ -225,12 +217,18 @@ function buildDone(full, ctx){
   const w = intentFlags(ctx.message);
   const hasGrades = !!(ctx.student && ctx.student.grades && Object.keys(ctx.student.grades).length);
   const st = roster.stats();
+  // نفى السائل الأداة صراحةً؟ لا نرسم شيئاً — ولو أصدر النموذج الرمز
+  const want = w.negated
+    ? { chart:false, donut:false, report:false, top:false }
+    : { chart:f.chart || w.chart, donut:f.donut || w.donut, report:f.report || w.report, top:f.top || w.top };
+  // ترتيب طلاب المدرسة بيانات طلاب آخرين — لا يُعرض لوليّ أمر أبداً
+  const mayRank = ctx.role === 'admin' || ctx.role === 'teacher';
   const out = {
     text: llm.stripTools(full),
-    chart: (f.chart || w.chart) && hasGrades,
-    donut: (f.donut || w.donut) && !!(ctx.student && ctx.student.attendance),
-    report: (f.report || w.report) && hasGrades,
-    top: (f.top || w.top) && !!(st && st.أعلى_10 && st.أعلى_10.length),
+    chart: want.chart && hasGrades,
+    donut: want.donut && !!(ctx.student && ctx.student.attendance),
+    report: want.report && hasGrades,
+    top: want.top && mayRank && !!(st && st.أعلى_10 && st.أعلى_10.length),
     student: ctx.student, avg: ctx.avg,
   };
   if(out.top) out.topData = st.أعلى_10;

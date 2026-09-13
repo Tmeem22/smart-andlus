@@ -385,7 +385,30 @@ async function waitUp(ms = 20000){
     check('بلا توكن ممنوع من تغيير كلمات المرور',
       (await req('POST', '/api/account/password', { body:{ current:'x', next:'Hacked12345' } })).status === 401);
 
-    /* ---------- 17. إعادة التعيين تمسح كل شيء ---------- */
+    /* ---------- 17. كشف نيّة الأدوات البصرية (بلا نداء AI) ---------- */
+    const { intentFlags } = require('../server/intent');
+    const intentCases = [
+      ['«أفضل مادة عند الطالب» لا يرسم ترتيب الطلاب', 'وش افضل ماده واضعف ماده في ذا الطالب', { top:false, chart:false }],
+      ['«أضعف مادة عند ابني» لا يرسم شيئاً',          'وش أفضل مادة وأضعف مادة عند ابني',      { top:false, chart:false }],
+      ['«رسم لأفضل الطلاب» يرسم الترتيب',             'سوي لي رسم بياني لافضل الطلاب',         { top:true,  chart:true }],
+      ['«أفضل 10 طلاب» يرسم الترتيب',                 'أفضل 10 طلاب',                          { top:true }],
+      ['«ترتيب الطلاب في الفصل» يرسم الترتيب',        'ترتيب الطلاب في الفصل',                 { top:true }],
+      ['«أعلى درجة في مادة» لا يرسم الترتيب',         'أعلى درجة في مادة الرياضيات',           { top:false }],
+      ['«ما قلت لك تسوي رسم» يلغي المرفق',            'انا ما قلت لك تسوي رسم',                { chart:false, top:false, negated:true }],
+      ['«لا تسوي رسم بياني» يلغي المرفق',             'لا تسوي رسم بياني',                     { chart:false, negated:true }],
+      ['«بدون رسم» يلغي المرفق',                      'بدون رسم من فضلك',                      { chart:false, negated:true }],
+      ['«شيل الرسمة» يلغي المرفق',                    'شيل الرسمة',                            { chart:false, negated:true }],
+      ['طلب الرسم الصريح يبقى يعمل',                  'ابي رسم بياني لدرجات ابني',             { chart:true, top:false }],
+      ['سؤال الحضور يعطي دائرة المواظبة',             'كم نسبة الحضور',                        { donut:true }],
+      ['طلب التقرير يعطي التقرير',                    'ابي تقرير كامل',                        { report:true }],
+    ];
+    intentCases.forEach(([label, msg, exp]) => {
+      const f = intentFlags(msg);
+      const okAll = Object.entries(exp).every(([k,v]) => f[k] === v);
+      check(label, okAll, JSON.stringify(f));
+    });
+
+    /* ---------- 18. إعادة التعيين تمسح كل شيء ---------- */
     await req('POST', '/api/roster/import', { token:A, form:(()=>{ const f=new FormData();
       f.append('file', new Blob([fs.readFileSync(ROSTER)]), 'سجل-اختبار.xlsx'); f.append('mode','replace'); return f; })() });
     await req('POST', '/api/reset', { token:A });
