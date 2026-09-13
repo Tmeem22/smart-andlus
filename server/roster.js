@@ -12,11 +12,24 @@ const db = require('./db');
 let IDX = { byId:new Map(), byName:new Map(), byClass:new Map(), list:[], stats:null, ready:false };
 
 /* ---------- تطبيع النص العربي للبحث ---------- */
+/* الأرقام العربية (٠١٢) والفارسية (۰۱۲) تُحوَّل إلى 012 —
+   وليّ الأمر يكتب الهوية بلوحة مفاتيح عربية فتفشل المطابقة بدون هذا */
+function arabicDigits(s){
+  return s.replace(/[٠-٩]/g, d => String(d.charCodeAt(0) - 0x0660))
+          .replace(/[۰-۹]/g, d => String(d.charCodeAt(0) - 0x06F0));
+}
 function norm(s){
-  return String(s == null ? '' : s)
+  return arabicDigits(String(s == null ? '' : s))
     .replace(/[ً-ْٰ]/g,'')      // تشكيل
     .replace(/[أإآٱ]/g,'ا').replace(/ى/g,'ي').replace(/ة/g,'ه').replace(/ؤ/g,'و').replace(/ئ/g,'ي')
     .replace(/\s+/g,' ').trim().toLowerCase();
+}
+/* تطبيع أرقام الهوية: أرقام عربية + إزالة المسافات والشُرَط وأي فاصل */
+function normId(s){
+  const t = arabicDigits(String(s == null ? '' : s)).trim().toLowerCase();
+  const stripped = t.replace(/[\s\-_.،,/\\]/g, '');
+  // رقم بحت جاء من إكسل كعدد (1.05e9) أو بأصفار بادئة — نوحّده كنص أرقام
+  return stripped;
 }
 
 /* ---------- قراءة الإكسل (مرة واحدة) ---------- */
@@ -98,6 +111,7 @@ function buildIndex(students, subjects){
   const byId = new Map(), byName = new Map(), byClass = new Map();
   students.forEach(s => {
     byId.set(norm(s.id), s);
+    if(normId(s.id) !== norm(s.id)) byId.set(normId(s.id), s);   // نسخة بلا فواصل
     byName.set(norm(s.name), s);
     // فهرسة جزئية: كل كلمة من الاسم تشير للطالب (بحث بالاسم الأول أو العائلة)
     norm(s.name).split(' ').forEach(w => {
@@ -175,6 +189,32 @@ async function importFile(filePath, fileName, mode = 'replace', mapping = null){
   db.DB.roster = { fileName, importedAt:Date.now(), count:students.length, subjects, students, stats:IDX.stats };
   db.saveNow();
   return { count:students.length, subjects, ms:Date.now()-t0, mode, stats:IDX.stats };
+}
+
+/* أي ملف إكسل يُرفع لأي خانة: إن كان فيه أعمدة هوية، سجّلها في السجل تلقائياً.
+   بدون هذا يرفع المدير ملفاً «فيه الهوية» ثم يُرفض دخول وليّ الأمر — وهو تناقض. */
+async function tryAutoIdentities(filePath, fileName){
+  let parsed;
+  try{ parsed = await parseWorkbook(filePath, null); }catch(_){ return null; }
+  const { students: incoming } = parsed;
+  if(!incoming.length) return null;
+  // لا نسجّل إلا إذا وُجدت هوية فعلية: رقم طالب من الملف أو هوية وليّ أمر.
+  // (parseWorkbook يولّد ST#### تلقائياً للصفوف بلا رقم — تلك ليست هوية)
+  const withGuardian = incoming.filter(s => s.guardianId).length;
+  const withRealId   = incoming.filter(s => s.id && !/^ST1\d{3}$/.test(s.id)).length;
+  if(!withGuardian && !withRealId) return null;
+  const prev = db.DB.roster;
+  const before = prev && Array.isArray(prev.students) ? prev.students.length : 0;
+  const students = (prev && Array.isArray(prev.students) && prev.students.length)
+    ? mergeStudents(prev.students, incoming) : incoming;
+  const subjects = Array.from(new Set([...((prev && prev.subjects) || []), ...parsed.subjects]));
+  students.forEach(s => { const g = Object.values(s.grades || {}).filter(v => typeof v === 'number');
+    s.avg = g.length ? Math.round(g.reduce((a,b)=>a+b,0)/g.length) : (s.avg || 0); });
+  IDX = buildIndex(students, subjects);
+  db.DB.roster = { fileName:(prev && prev.fileName) || fileName, importedAt:Date.now(),
+    count:students.length, subjects, students, stats:IDX.stats };
+  db.saveNow();
+  return { added: students.length - before, total: students.length, guardians: withGuardian };
 }
 
 /* مسح السجل والفهرس نهائياً (يحافظ على اتساق ما يقوله البوت) */
@@ -276,13 +316,17 @@ const stats = () => IDX.stats;
 const ready = () => IDX.ready;
 const count = () => IDX.list.length;
 const list = () => IDX.list;
-/* جلب طالب بالرقم (id) — بحث فوري */
-const get = (id) => IDX.byId.get(norm(id)) || null;
-/* طلاب وليّ أمر برقم هويته */
-const byGuardian = (gid) => { const g = norm(gid); return IDX.list.filter(s => norm(s.guardianId) === g); };
+/* جلب طالب بالرقم (id) — بحث فوري، يتحمّل الأرقام العربية والفواصل */
+const get = (id) => IDX.byId.get(norm(id)) || IDX.byId.get(normId(id)) || null;
+/* طلاب وليّ أمر برقم هويته — مطابقة متسامحة مع صيغة الرقم */
+const byGuardian = (gid) => {
+  const g = normId(gid);
+  if(!g) return [];
+  return IDX.list.filter(s => normId(s.guardianId) === g);
+};
 
 /* اسم الملف الذي بُني منه السجل (لربط حذف الملف بحذف السجل) */
 const sourceFile = () => (db.DB.roster && db.DB.roster.fileName) || null;
 
-module.exports = { importFile, hydrate, findStudents, classOf, search, stats, ready, count, norm, list, get,
-  byGuardian, clear, rebuild, updateStudent, removeStudent, sourceFile };
+module.exports = { importFile, hydrate, findStudents, classOf, search, stats, ready, count, norm, normId, list, get,
+  byGuardian, clear, rebuild, updateStudent, removeStudent, sourceFile, tryAutoIdentities };

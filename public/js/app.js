@@ -847,8 +847,13 @@ function openUpload(){
       if(fileInput.files[0]) fd.append('file', fileInput.files[0]);
       if(name) fd.append('name', name);
       if(content) fd.append('content', content);
-      try{ await api('/api/files', { method:'POST', form:fd }); closeModal(); go('tfiles'); toast('تم رفع الملف وإرساله للمدير ✅'); }
-      catch(e){ toast(e.message); }
+      try{
+        const r = await api('/api/files', { method:'POST', form:fd });
+        closeModal(); go('tfiles');
+        const ai = r.file && r.file.autoIdentities;
+        toast(ai ? `تم الرفع ✅ وسُجّلت بيانات ${ai.total} طالب في السجل`
+                 : 'تم رفع الملف وإرساله للمدير ✅');
+      }catch(e){ toast(e.message); }
     }}, { t:'إلغاء', cls:'btn ghost', fn:closeModal }]);
 }
 async function viewFile(id){
@@ -1071,8 +1076,13 @@ function openBrainUpload(){
       const fd = new FormData(); fd.append('brain','1'); fd.append('name', name);
       if(el('bFile').files[0]) fd.append('file', el('bFile').files[0]);
       if(el('bC').value.trim()) fd.append('content', el('bC').value.trim());
-      try{ await api('/api/files', { method:'POST', form:fd }); closeModal(); go('brain'); toast('تمت تغذية البوت ✅'); }
-      catch(e){ toast(e.message); }
+      try{
+        const r = await api('/api/files', { method:'POST', form:fd });
+        closeModal(); go('brain');
+        const ai = r.file && r.file.autoIdentities;
+        toast(ai ? `تمت التغذية ✅ وسُجّلت الهويات تلقائياً (${ai.total} طالب) — أولياء الأمور يقدرون يدخلون الآن`
+                 : 'تمت تغذية البوت ✅');
+      }catch(e){ toast(e.message); }
     }}, { t:'إلغاء', cls:'btn ghost', fn:closeModal }]);
 }
 

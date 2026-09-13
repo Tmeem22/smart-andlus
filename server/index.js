@@ -137,12 +137,22 @@ app.post('/api/login', (req,res)=>{
     let kids = [];
     if(idType === 'guardian') kids = roster.ready() ? roster.byGuardian(idv) : [];
     else { const s = findStudentAny(idv); if(s) kids = [s]; }
-    if(!kids.length) return res.status(401).json({ error: idType==='guardian'
-      ? 'لم نعثر على أبناء مسجّلين بهذا الرقم.' : 'لم نعثر على طالب بهذا الرقم في السجل.' });
+    if(!kids.length){
+      // نفرّق بين «لا يوجد سجل أصلاً» و«الرقم غير مسجّل» — الرسالة الغامضة كانت تربك
+      if(!roster.ready() && !db.DB.students.length)
+        return res.status(401).json({ error:'لم تُسجَّل بيانات الطلاب في المنصة بعد — يرجى مراجعة إدارة المدرسة.' });
+      return res.status(401).json({ error: idType==='guardian'
+        ? 'لم نعثر على أبناء مسجّلين بهذا الرقم. تأكد من رقم هوية وليّ الأمر، أو ادخل برقم الطالب.'
+        : 'لم نعثر على طالب بهذا الرقم في السجل. تأكد من رقم الطالب، أو ادخل برقم هوية وليّ الأمر.' });
+    }
     const childIds = kids.map(k => k.id);
     const gname = kids[0].guardian || 'ولي الأمر';
-    const key = 'parent:' + idType + ':' + idv;
-    let pu = db.DB.users.find(u => u.role==='parent' && u.idKey===key);
+    // المفتاح مُطبَّع: ST1001 و st1001 و ١٠٥١ و 1051 = حساب واحد لا حسابات متفرّقة
+    const key = 'parent:' + idType + ':' + roster.normId(idv);
+    let pu = db.DB.users.find(u => u.role==='parent' && u.idKey===key)
+      || db.DB.users.find(u => u.role==='parent' && u.idKey && u.idKey.startsWith('parent:'+idType+':')
+           && roster.normId(u.idKey.split(':').slice(2).join(':')) === roster.normId(idv));
+    if(pu) pu.idKey = key;   // توحيد المفاتيح القديمة
     if(!pu){ pu = { id:'pv'+Date.now().toString(36)+Math.random().toString(16).slice(2,5), role:'parent',
       name: idType==='guardian' ? ('ولي أمر — '+gname) : ('ولي أمر — '+(kids[0].name||'')),
       idKey:key, children:childIds, virtual:true }; db.DB.users.push(pu); }
@@ -558,6 +568,14 @@ app.post('/api/files', auth, requireRole('teacher','admin'), requirePerm('files'
     mime, path:filePath, content, ts:Date.now(),
   };
   db.DB.files.push(f); saveDB();
+  // إكسل فيه أعمدة هوية؟ سجّله في السجل فوراً — وإلا رُفض دخول وليّ الأمر
+  // رغم أن «الملف فيه الهوية»
+  if(req.file && /\.xlsx?$/i.test(orig)){
+    try{
+      const auto = await roster.tryAutoIdentities(path.join(UPLOAD_DIR, req.file.filename), orig);
+      if(auto){ f.autoIdentities = auto; db.saveNow(); }
+    }catch(e){ console.error('تعذّر تسجيل الهويات تلقائياً:', e.message); }
+  }
   if(req.user.role==='teacher'){
     const admin = db.DB.users.find(u=>u.role==='admin');
     if(admin) pushNotif(admin.id, 'ملف جديد من '+req.user.name, name+' — بانتظار مراجعتك');

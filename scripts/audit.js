@@ -178,7 +178,109 @@ async function waitUp(ms = 20000){
     const blocked2 = await req('GET', '/api/contacts', { token:N });
     check('معلم بلا صلاحية «messages» يُمنع من جهات الاتصال', blocked2.status === 403, 'status ' + blocked2.status);
 
-    /* ---------- 10. إعادة التعيين تمسح كل شيء ---------- */
+    /* ---------- 10. دخول وليّ الأمر: كل صيغ الرقم ---------- */
+    await req('POST', '/api/roster/import', { token:A, form:(()=>{ const f=new FormData();
+      f.append('file', new Blob([fs.readFileSync(ROSTER)]), 'سجل-الطلاب-300.xlsx'); f.append('mode','replace'); return f; })() });
+    const row = (await req('GET', '/api/roster/search?q=&page=1&per=1', { token:A })).json.rows[0];
+    const gid = row.guardianId, sid = row.id;
+    const toAr = s => String(s).replace(/[0-9]/g, d => String.fromCharCode(0x0660 + (+d)));
+    const variants = [
+      ['هوية وليّ الأمر كما هي',        'guardian', gid],
+      ['هوية وليّ الأمر بأرقام عربية',  'guardian', toAr(gid)],
+      ['هوية وليّ الأمر بمسافات',       'guardian', ' ' + gid + ' '],
+      ['هوية وليّ الأمر بشُرَط',         'guardian', gid.slice(0,4) + '-' + gid.slice(4)],
+      ['رقم الطالب كما هو',            'student',  sid],
+      ['رقم الطالب بحروف صغيرة',       'student',  String(sid).toLowerCase()],
+      ['رقم الطالب بمسافات',           'student',  '  ' + sid + ' '],
+    ];
+    const seenUsers = new Set();
+    for(const [label, idType, ident] of variants){
+      const r = await req('POST', '/api/login', { body:{ role:'parent', idType, identifier: ident } });
+      const ok = r.status === 200 && r.json.token && r.json.me.children.length > 0;
+      check('دخول وليّ الأمر — ' + label, ok, 'status ' + r.status + ' ' + (r.json.error || ''));
+      if(ok) seenUsers.add(idType + ':' + r.json.me.id);
+    }
+    check('كل صيغ نفس الرقم = حساب واحد (لا حسابات مكرّرة)', seenUsers.size === 2,
+      'حسابات: ' + seenUsers.size + ' [' + [...seenUsers].join(', ') + ']');
+
+    /* رسالة خطأ واضحة عند رقم غير موجود */
+    const bad = await req('POST', '/api/login', { body:{ role:'parent', idType:'guardian', identifier:'9999999999' } });
+    check('رقم غير موجود يعطي رسالة مفهومة', bad.status === 401 && /تأكد من رقم/.test(bad.json.error||''), bad.json.error);
+
+    /* ---------- 11. وليّ الأمر: أبناؤه ومحادثاته وحدوده ---------- */
+    const pr = await req('POST', '/api/login', { body:{ role:'parent', idType:'guardian', identifier:gid } });
+    const PT = pr.json.token;
+    const ch = (await req('GET', '/api/children', { token:PT })).json;
+    check('وليّ الأمر يرى أبناءه', ch.children.length >= 1, String(ch.children.length));
+    check('بيانات الابن كاملة (صف/فصل/درجات)',
+      !!(ch.children[0].name && ch.children[0].classNo && Object.keys(ch.children[0].grades||{}).length),
+      JSON.stringify(ch.children[0]).slice(0,120));
+    const pForbid = await req('GET', '/api/students', { token:PT });
+    check('وليّ الأمر ممنوع من خانة الطلاب', pForbid.status === 403, 'status ' + pForbid.status);
+    const pForbid2 = await req('GET', '/api/teachers', { token:PT });
+    check('وليّ الأمر ممنوع من خانة المعلمين', pForbid2.status === 403, 'status ' + pForbid2.status);
+    const pForbid3 = await req('POST', '/api/roster/clear', { token:PT });
+    check('وليّ الأمر ممنوع من مسح السجل', pForbid3.status === 403, 'status ' + pForbid3.status);
+    const pConv = await req('GET', '/api/convos', { token:PT });
+    check('سجل محادثات وليّ الأمر متاح', pConv.status === 200 && Array.isArray(pConv.json.convos), 'status ' + pConv.status);
+    const otherKid = (await req('GET', '/api/roster/search?q=&page=2&per=1', { token:A })).json.rows[0];
+    const cross = await req('POST', '/api/chat', { token:PT, body:{ message:'مرحبا', studentId: otherKid.id } });
+    check('وليّ الأمر لا يسأل عن ابن غيره', cross.status >= 400, 'status ' + cross.status);
+
+    /* ---------- 12. ثبات الجلسة بعد إعادة التشغيل ---------- */
+    const meAgain = await req('GET', '/api/me', { token:PT });
+    check('جلسة وليّ الأمر تعمل عند العودة', meAgain.status === 200, 'status ' + meAgain.status);
+
+    /* ---------- 13. ملف فيه هويات يُرفع لأي خانة = تسجيل تلقائي ---------- */
+    await req('POST', '/api/roster/clear', { token:A });
+    const idsFile = path.join(__dirname, '..', 'data', 'نموذج-ملف-الهويات.xlsx');
+    if(fs.existsSync(idsFile)){
+      const bf = new FormData();
+      bf.append('brain', '1'); bf.append('name', 'ملف فيه هويات');
+      bf.append('file', new Blob([fs.readFileSync(idsFile)]), 'نموذج-ملف-الهويات.xlsx');
+      const bu = await req('POST', '/api/files', { token:A, form:bf });
+      check('رفع ملف هويات لخانة عقل البوت ينجح', bu.status === 200, 'status ' + bu.status);
+      const st13 = (await req('GET', '/api/roster/stats', { token:A })).json;
+      check('الهويات تُسجَّل تلقائياً من أي ملف (لا رفض بعدها)', st13.ready && st13.count > 0, JSON.stringify(st13.count));
+      const rows13 = (await req('GET', '/api/roster/search?q=&page=1&per=5', { token:A })).json.rows;
+      const g13 = (rows13.find(r=>r.guardianId) || {}).guardianId;
+      if(g13){
+        const lg13 = await req('POST', '/api/login', { body:{ role:'parent', idType:'guardian', identifier:g13 } });
+        check('وليّ الأمر يدخل بهوية من ملف رُفع لخانة أخرى', lg13.status === 200, 'status ' + lg13.status + ' ' + (lg13.json.error||''));
+      }
+    }
+
+    /* ---------- 14. المعلم: يرى ملفاته فقط ---------- */
+    const t14 = await req('POST', '/api/teachers', { token:A, body:{ name:'معلم ب', user:'tb', pass:'1234', perms:['files','messages'] } });
+    const TB = (await req('POST', '/api/login', { body:{ role:'teacher', user:'tb', pass:'1234' } })).json.token;
+    const f14 = new FormData(); f14.append('name','ملف المعلم ب'); f14.append('content','خاص');
+    await req('POST', '/api/files', { token:TB, form:f14 });
+    const t14b = await req('POST', '/api/teachers', { token:A, body:{ name:'معلم ج', user:'tc', pass:'1234', perms:['files','messages'] } });
+    const TC = (await req('POST', '/api/login', { body:{ role:'teacher', user:'tc', pass:'1234' } })).json.token;
+    const seenByC = (await req('GET', '/api/files', { token:TC })).json.files;
+    check('المعلم لا يرى ملفات معلم آخر', !seenByC.some(f => f.name === 'ملف المعلم ب'), String(seenByC.length));
+    const bFiles = (await req('GET', '/api/files', { token:TB })).json.files;
+    const bFileId = (bFiles.find(f=>f.name==='ملف المعلم ب')||{}).id;
+    const rawSteal = await req('GET', '/api/files/' + bFileId + '/raw', { token:TC });
+    check('المعلم لا يفتح ملف معلم آخر مباشرة', rawSteal.status === 403, 'status ' + rawSteal.status);
+    const tAdmin = await req('GET', '/api/brain', { token:TB });
+    check('المعلم ممنوع من عقل البوت', tAdmin.status === 403, 'status ' + tAdmin.status);
+    const tDel = await req('DELETE', '/api/files/' + bFileId, { token:TB });
+    check('المعلم لا يحذف ملفات (الحذف للمدير)', tDel.status === 403, 'status ' + tDel.status);
+    const tRoster = await req('POST', '/api/roster/clear', { token:TB });
+    check('المعلم لا يمسح السجل', tRoster.status === 403, 'status ' + tRoster.status);
+
+    /* ---------- 15. جلسة بلا توكن / توكن خاطئ ---------- */
+    const noTok = await req('GET', '/api/me', {});
+    check('بلا توكن = 401', noTok.status === 401, 'status ' + noTok.status);
+    const badTok = await req('GET', '/api/me', { token:'x'.repeat(40) });
+    check('توكن خاطئ = 401', badTok.status === 401, 'status ' + badTok.status);
+    const lo = await req('POST', '/api/logout', { token:TC });
+    check('تسجيل الخروج ينجح', lo.status === 200, 'status ' + lo.status);
+    const afterLo = await req('GET', '/api/me', { token:TC });
+    check('التوكن يبطل بعد الخروج', afterLo.status === 401, 'status ' + afterLo.status);
+
+    /* ---------- 16. إعادة التعيين تمسح كل شيء ---------- */
     await req('POST', '/api/roster/import', { token:A, form:(()=>{ const f=new FormData();
       f.append('file', new Blob([fs.readFileSync(ROSTER)]), 'سجل-الطلاب-300.xlsx'); f.append('mode','replace'); return f; })() });
     await req('POST', '/api/reset', { token:A });
