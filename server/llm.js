@@ -10,14 +10,28 @@ const API_URL = 'https://api.fireworks.ai/inference/v1/chat/completions';
 const MODEL   = process.env.FIREWORKS_MODEL || 'accounts/fireworks/models/glm-5p3-flash';
 
 /* مصادر نصية إضافية (ملفات المدير المقبولة) — مقصوصة، ليست 300 صف */
-function brainNotes(){
+/* توفير تكلفة: فهرس مختصر دائماً + نصّ الملف الكامل فقط إن كان السؤال يخصّه */
+function brainNotes(question){
   const files = (db.DB.files || []).filter(f => f.status === 'approved');
   if(!files.length) return '';
-  const withText = files.filter(f => f.content);
-  const noText   = files.filter(f => !f.content);
-  const parts = withText.map(f => `# ${f.name} (${f.subject})\n${String(f.content).slice(0, 4000)}`);
-  if(noText.length) parts.push('# ملفات مرفقة بلا نص مقروء: ' + noText.map(f => f.name).join(' · '));
-  return parts.join('\n\n').slice(0, 14000);
+  const index = files.map(f => `• ${f.name} (${f.subject})${f.content ? '' : ' — بلا نص مقروء'}`).join('\n');
+
+  const q = roster.norm(question || '');
+  const words = q.split(/\s+/).filter(w => w.length > 2);
+  let picked = [];
+  if(words.length){
+    picked = files.filter(f => f.content).map(f => {
+      const head = roster.norm(f.name + ' ' + f.subject);
+      const body = roster.norm(String(f.content).slice(0, 6000));
+      const score = words.reduce((s, w) => s + (head.includes(w) ? 3 : 0) + (body.includes(w) ? 1 : 0), 0);
+      return { f, score };
+    }).filter(x => x.score > 0).sort((a,b) => b.score - a.score).slice(0, 2);
+  }
+  let out = `فهرس الملفات المعتمدة (اطلب محتوى ملف بالاسم عند الحاجة):\n${index}`;
+  if(picked.length){
+    out += '\n\n' + picked.map(x => `# محتوى «${x.f.name}»\n${String(x.f.content).slice(0, 3500)}`).join('\n\n');
+  }
+  return out.slice(0, 9000);
 }
 
 const style = require('./style-saudi');
@@ -71,7 +85,7 @@ function studentBlock(s, avg){
 }
 
 /** وضع وليّ الأمر: طالب واحد محدّد */
-function promptForParent(student, avg){
+function promptForParent(student, avg, question){
   return `${RULES}
 
 مهمتك: مساعدة وليّ الأمر بمعلومات دقيقة عن ابنه/ابنته أدناه فقط.
@@ -80,7 +94,7 @@ function promptForParent(student, avg){
 ${studentBlock(student, avg)}
 
 == مصادر معرفية إضافية من إدارة المدرسة ==
-${brainNotes() || '(لا توجد)'}`;
+${brainNotes(question) || '(لا توجد)'}`;
 }
 
 /* ---------- اختيار السياق حسب نيّة السؤال ----------
@@ -143,7 +157,7 @@ function promptForSchool(question){
   }
   const sec = sectionsContext(question);
   if(sec) parts.push(`\n== محتوى الخانات المطلوبة (لديك صلاحية الاطلاع) ==\n${sec}`);
-  const notes = brainNotes();
+  const notes = brainNotes(question);
   if(notes) parts.push(`\n== مصادر معرفية إضافية (ملفات معتمدة) ==\n${notes}`);
   return parts.join('\n');
 }

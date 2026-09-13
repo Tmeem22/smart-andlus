@@ -140,7 +140,7 @@ function resolveChat(user, body){
     const s = findStudentAny(sid);
     if(!s || !(user.children||[]).includes(sid)) return { error:'الطالب غير موجود' };
     const avg = avgOf(s);
-    return { message, key:user.id+':'+sid, system:llm.promptForParent(clientStudent(s), avg), student:clientStudent(s), avg };
+    return { message, key:user.id+':'+sid, system:llm.promptForParent(clientStudent(s), avg, message), student:clientStudent(s), avg };
   }
   // مدير / معلم: بحث فوري في الفهرس
   const hit = roster.ready() ? roster.findStudents(message, 1)[0] : null;
@@ -287,6 +287,30 @@ app.get('/api/roster/search', auth, (req,res)=>{
   const { q = '', page = '1', per = '25' } = req.query;
   res.json({ ready:true, ...roster.search(String(q).trim(), +page || 1, Math.min(+per || 25, 100)) });
 });
+/* نموذج ملف الهويات الجاهز (تحميل) */
+app.get('/api/roster/template', auth, requireRole('admin'), async (req,res)=>{
+  try{
+    const ExcelJS = require('exceljs');
+    const wb = new ExcelJS.Workbook();
+    const ws = wb.addWorksheet('الهويات', { views:[{ rightToLeft:true, state:'frozen', ySplit:1 }] });
+    ws.columns = [
+      { header:'رقم الطالب', key:'id', width:14 },
+      { header:'اسم الطالب', key:'name', width:28 },
+      { header:'الصف', key:'level', width:16 },
+      { header:'الفصل', key:'section', width:10 },
+      { header:'ولي الأمر', key:'guardian', width:22 },
+      { header:'هوية ولي الأمر', key:'guardianId', width:18 },
+    ];
+    ws.addRow({ id:'ST1001', name:'عبدالله فهد الغامدي', level:'الثاني متوسط', section:'2/أ', guardian:'فهد الغامدي', guardianId:'1012345678' });
+    ws.addRow({ id:'ST1002', name:'سارة فهد الغامدي', level:'الرابع ابتدائي', section:'4/ب', guardian:'فهد الغامدي', guardianId:'1012345678' });
+    ws.getRow(1).eachCell(c=>{ c.font={bold:true,color:{argb:'FFFFFFFF'}}; c.fill={type:'pattern',pattern:'solid',fgColor:{argb:'FF0D5C46'}}; c.alignment={horizontal:'center'}; });
+    const buf = await wb.xlsx.writeBuffer();
+    res.setHeader('Content-Type','application/vnd.openxmlformats-officedocument.spreadsheetml.sheet');
+    res.setHeader('Content-Disposition','attachment; filename="identities-template.xlsx"');
+    res.send(Buffer.from(buf));
+  }catch(e){ res.status(500).json({ error:'تعذّر توليد النموذج: '+e.message }); }
+});
+
 /* الوكيل الذكي: يحلّل ملفاً ويقترح خريطة الأعمدة (وقد يسأل بخيارات) */
 app.post('/api/roster/analyze', auth, requireRole('admin'), upload.single('file'), async (req,res)=>{
   if(!req.file) return res.status(400).json({ error:'اختر ملف إكسل (.xlsx)' });

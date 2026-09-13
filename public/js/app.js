@@ -431,7 +431,23 @@ async function renderRoster(v){
           <button class="btn ghost" id="rosterMerge" title="يدمج الملف مع السجل الحالي (يضيف طلاب/درجات بمطابقة رقم الطالب)">＋ إضافة/دمج</button>
         </div>
       </div>
-      <p class="small muted" style="margin:10px 2px 0">💡 <b>استبدال الكل</b>: ملف كامل جديد. · <b>إضافة/دمج</b>: للهويات أولاً ثم ملفات المواد — تُدمج الدرجات بمطابقة «رقم الطالب».</p>
+      <p class="small muted" style="margin:10px 2px 0">💡 <b>استبدال الكل</b>: ملف كامل جديد. · <b>إضافة/دمج</b>: يدمج بمطابقة «رقم الطالب». · <b>تحليل ذكي</b>: الوكيل يفصل الأعمدة بنفسه.</p>
+    </div>
+
+    <div class="card card-pad mb" style="border-color:var(--green)">
+      <div class="flex between center wrap gap">
+        <div class="flex center gap">
+          <div style="width:46px;height:46px;border-radius:12px;background:#eef3f0;color:var(--green);display:grid;place-items:center">${I.student}</div>
+          <div><b>ملف الهويات — تسجيل الدخول</b>
+            <div class="small muted">الأعمدة المطلوبة: رقم الطالب · اسم الطالب · الصف · الفصل · ولي الأمر · هوية ولي الأمر</div></div>
+        </div>
+        <div class="flex gap wrap center">
+          <button class="btn ghost" id="idTemplate">⬇️ تحميل نموذج</button>
+          <input type="file" id="idFile" accept=".xlsx" style="max-width:200px;padding:9px;border:1.5px solid var(--line);border-radius:12px">
+          <button class="btn" id="idUpload">🔐 رفع وتسجيل الهويات</button>
+        </div>
+      </div>
+      <p class="small muted" style="margin:10px 2px 0">بعد الرفع يقدر وليّ الأمر يدخل <b>برقم الطالب</b> أو <b>برقم هويته</b> مباشرة. ملفات المواد تُرفع فوق بوضع «إضافة/دمج».</p>
     </div>
     ${s ? `<div class="grid cols4 mb">
       ${stat(I.student, s.عدد_الطلاب, 'إجمالي الطلاب', '#12735a', '#e3f6ec')}
@@ -450,12 +466,46 @@ async function renderRoster(v){
   el('rosterSmart').onclick = smartImport;
   el('rosterReplace').onclick = () => doImport('replace');
   el('rosterMerge').onclick = () => doImport('merge');
+  el('idTemplate').onclick = downloadIdTemplate;
+  el('idUpload').onclick = uploadIdentities;
   animateCounts();
   const sb = el('rosterSearch');
   if(sb){ let t; sb.oninput = () => { clearTimeout(t); t = setTimeout(()=>{ rosterQ = sb.value.trim(); rosterPage = 1; loadRosterTable(); }, 250); }; }
   if(info.ready) loadRosterTable();
   else el('rosterTable').innerHTML = `<div class="empty-state small">استورد ملف الإكسل أولاً</div>`;
 }
+/* تحميل نموذج ملف الهويات */
+async function downloadIdTemplate(){
+  try{
+    const res = await fetch('/api/roster/template', { headers:{ Authorization:'Bearer '+TOKEN } });
+    if(!res.ok) throw new Error('HTTP '+res.status);
+    const blob = await res.blob();
+    const a = document.createElement('a');
+    a.href = URL.createObjectURL(blob); a.download = 'نموذج-ملف-الهويات.xlsx';
+    document.body.appendChild(a); a.click(); a.remove();
+    setTimeout(()=>URL.revokeObjectURL(a.href), 4000);
+    toast('نزّل النموذج — عبّه وارفعه ✅');
+  }catch(e){ toast('تعذّر التحميل: '+e.message); }
+}
+
+/* رفع ملف الهويات: الوكيل يفصل الأعمدة ثم يُدمج مباشرة */
+async function uploadIdentities(){
+  const f = el('idFile').files[0];
+  if(!f){ toast('اختر ملف الهويات (.xlsx) أولاً'); return; }
+  const b = el('idUpload'); b.disabled = true; b.textContent = '🤖 يقرأ ويسجّل...';
+  try{
+    const fd = new FormData(); fd.append('file', f);
+    const a = await api('/api/roster/analyze', { method:'POST', form:fd });
+    if(a.question){ b.disabled = false; b.textContent = '🔐 رفع وتسجيل الهويات'; showAgentResult(a, f); return; }
+    const m = a.mapping || {};
+    if(!m.id && !m.guardianId){ throw new Error('لم أجد عمود «رقم الطالب» ولا «هوية ولي الأمر» — استخدم النموذج.'); }
+    const fd2 = new FormData(); fd2.append('file', f); fd2.append('mode','merge'); fd2.append('mapping', JSON.stringify(m));
+    const r = await api('/api/roster/import', { method:'POST', form:fd2 });
+    toast(`تم تسجيل الهويات — ${r.count} طالب ✅`);
+    go('roster');
+  }catch(e){ toast(e.message); b.disabled = false; b.textContent = '🔐 رفع وتسجيل الهويات'; }
+}
+
 /* الوكيل الذكي: يحلّل الملف ويفصل الأعمدة، ويسأل بخيارات عند الحاجة */
 async function smartImport(){
   const f = el('rosterFile').files[0];
