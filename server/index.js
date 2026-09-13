@@ -400,8 +400,9 @@ app.post('/api/files', auth, requireRole('teacher','admin'), upload.single('file
     mime = req.file.mimetype || 'application/octet-stream';
     filePath = 'uploads/' + req.file.filename;
     name = b.name || req.file.originalname;
-    // استخراج النص (نصوص + إكسل) ليقرأه البوت
-    const got = await extract.extractText(path.join(UPLOAD_DIR, req.file.filename), name, mime);
+    // استخراج النص (نصوص + إكسل + PDF + Word) ليقرأه البوت
+    // نستخدم اسم الملف الأصلي (فيه الامتداد) لا الاسم المعروض
+    const got = await extract.extractText(path.join(UPLOAD_DIR, req.file.filename), req.file.originalname || name, mime);
     if(got) content = got;
   }
   const f = {
