@@ -359,8 +359,10 @@ app.get('/api/roster/template', auth, requireRole('admin'), async (req,res)=>{
       { header:'ولي الأمر', key:'guardian', width:22 },
       { header:'هوية ولي الأمر', key:'guardianId', width:18 },
     ];
-    ws.addRow({ id:'ST1001', name:'عبدالله فهد الغامدي', level:'الثاني متوسط', section:'2/أ', guardian:'فهد الغامدي', guardianId:'1012345678' });
-    ws.addRow({ id:'ST1002', name:'سارة فهد الغامدي', level:'الرابع ابتدائي', section:'4/ب', guardian:'فهد الغامدي', guardianId:'1012345678' });
+    // صفّا مثال بصيغة واضحة أنها تعبئة توضيحية — تُستبدل ببيانات المدرسة
+    ws.addRow({ id:'(رقم الطالب)', name:'(اسم الطالب رباعي)', level:'(الصف)', section:'(الفصل)',
+      guardian:'(اسم وليّ الأمر)', guardianId:'(هوية وليّ الأمر — بها يسجّل الدخول)' });
+    ws.addRow({ id:'(احذف صفّي المثال قبل الرفع)', name:'', level:'', section:'', guardian:'', guardianId:'' });
     ws.getRow(1).eachCell(c=>{ c.font={bold:true,color:{argb:'FFFFFFFF'}}; c.fill={type:'pattern',pattern:'solid',fgColor:{argb:'FF0D5C46'}}; c.alignment={horizontal:'center'}; });
     const buf = await wb.xlsx.writeBuffer();
     res.setHeader('Content-Type','application/vnd.openxmlformats-officedocument.spreadsheetml.sheet');
@@ -437,7 +439,10 @@ app.post('/api/teachers', auth, requireRole('admin'), (req,res)=>{
   const { name, user, subject, nid, pass, perms } = req.body || {};
   if(!name || !user) return res.status(400).json({ error:'الاسم واسم الدخول مطلوبان' });
   if(db.DB.users.some(u=>u.user===user)) return res.status(409).json({ error:'اسم الدخول مستخدم' });
-  const t = { id:'t'+Date.now(), role:'teacher', name, user, subject:subject||SUBJECTS[0], nid:nid||'', pass:hashPw(pass||'1234'), perms:Array.isArray(perms)?perms:['files','messages'] };
+  // لا كلمة مرور افتراضية — حساب بكلمة معروفة مسبقاً = باب مفتوح
+  if(!pass || String(pass).length < 6)
+    return res.status(400).json({ error:'اختر كلمة مرور للمعلم لا تقل عن 6 خانات.' });
+  const t = { id:'t'+Date.now(), role:'teacher', name, user, subject:subject||SUBJECTS[0], nid:nid||'', pass:hashPw(pass), perms:Array.isArray(perms)?perms:['files','messages'] };
   db.DB.users.push(t); saveDB(); res.json({ teacher: publicUser(t) });
 });
 app.put('/api/teachers/:id', auth, requireRole('admin'), (req,res)=>{
@@ -449,7 +454,10 @@ app.put('/api/teachers/:id', auth, requireRole('admin'), (req,res)=>{
     name: name??t.name, user: user??t.user, subject: subject??t.subject,
     nid: nid??t.nid, perms: Array.isArray(perms)?perms:t.perms,
   });
-  if(pass) t.pass = hashPw(pass);
+  if(pass){
+    if(String(pass).length < 6) return res.status(400).json({ error:'كلمة المرور الجديدة قصيرة — 6 خانات فأكثر.' });
+    t.pass = hashPw(pass);
+  }
   saveDB(); res.json({ teacher: publicUser(t) });
 });
 app.delete('/api/teachers/:id', auth, requireRole('admin'), (req,res)=>{

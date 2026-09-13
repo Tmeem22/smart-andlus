@@ -46,14 +46,7 @@ const PERMS = { files:'رفع الملفات', students:'إدارة الطلاب
 /* ============================================================
    LOGIN
    ============================================================ */
-/* لإظهار بيانات الدخول التجريبية على صفحة الدخول اجعل SHOW_DEMO_HINTS=true.
-   على النسخة المنشورة للعامة نُبقيها false حتى لا تُعرض كلمات المرور للجميع. */
-const SHOW_DEMO_HINTS = false;
-const hints = {
-  parent:'<b>ولي أمر:</b> parent / 1234',
-  teacher:'<b>معلم:</b> sara / 1234 · noura / 1234',
-  admin:'<b>مدير:</b> admin / 1234',
-};
+/* لا تُعرض أي بيانات دخول على صفحة الدخول — الموقع عام */
 let PARENT_IDTYPE = 'student';   // student | guardian
 const roleIcon = {
   parent:'<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8"><path d="M17 21v-2a4 4 0 0 0-4-4H7a4 4 0 0 0-4 4v2"/><circle cx="10" cy="7" r="4"/><path d="M21 21v-2a4 4 0 0 0-3-3.87"/></svg>',
@@ -134,14 +127,14 @@ function openForm(role, idType){
   el('lgErr').textContent = '';
   if(isParent){
     el('idLabel').textContent = idType === 'guardian' ? 'رقم هويتك (وليّ الأمر)' : 'رقم هوية الطالب';
-    el('lgId').placeholder = idType === 'guardian' ? 'مثال: 1088776655' : 'مثال: ST1001';
+    el('lgId').placeholder = idType === 'guardian' ? 'رقم هوية وليّ الأمر' : 'رقم هوية الطالب';
     setTimeout(()=> el('lgId').focus(), 60);
     el('demoHint').innerHTML = idType === 'guardian'
       ? 'أدخل رقم هويتك لعرض أبنائك المسجّلين.'
       : 'أدخل رقم هوية الطالب لعرض بياناته.';
   } else {
     setTimeout(()=> el('lgUser').focus(), 60);
-    el('demoHint').innerHTML = SHOW_DEMO_HINTS ? hints[role] : ({teacher:'دخول المعلّم ببيانات المدرسة.', admin:'دخول مدير النظام.'}[role]);
+    el('demoHint').innerHTML = ({ teacher:'دخول المعلّم ببيانات المدرسة.', admin:'دخول مدير النظام.' }[role]) || '';
   }
 }
 function backToWizard(){
@@ -955,13 +948,15 @@ function openTeacher(t){
     <div class="field"><label>المادة</label><select id="tSubj">${SUBJECTS.map(s=>`<option ${t&&t.subject===s?'selected':''}>${s}</option>`).join('')}</select></div>
     <div class="grid cols2"><div class="field"><label>اسم الدخول</label><input id="tUser" value="${t?esc(t.user):''}" placeholder="username"></div>
       <div class="field"><label>رقم الهوية (اختياري)</label><input id="tNid" value="${t?esc(t.nid||''):''}" placeholder="10xxxxxxxx"></div></div>
-    <div class="field"><label>كلمة المرور ${t?'(اتركها فارغة لعدم التغيير)':''}</label><input id="tPass" value="${t?'':'1234'}"></div>
+    <div class="field"><label>كلمة المرور ${t?'(اتركها فارغة لعدم التغيير)':'(6 خانات فأكثر)'}</label><input id="tPass" value="" placeholder="${t?'بدون تغيير':'اختر كلمة مرور قوية'}"></div>
     <div class="field"><label>الصلاحيات</label><div class="perm-grid">${Object.entries(PERMS).map(([k,l])=>`<label><input type="checkbox" value="${k}" ${(!t&&['files','messages'].includes(k))||(t&&(t.perms||[]).includes(k))?'checked':''}> ${l}</label>`).join('')}</div></div>`,
     [{ t:t?'حفظ':'إضافة', cls:'btn', fn: async () => {
       const perms = [...document.querySelectorAll('.perm-grid input:checked')].map(x=>x.value);
       const body = { name:el('tName').value.trim(), user:el('tUser').value.trim(), subject:el('tSubj').value, nid:el('tNid').value.trim(), perms };
       const pass = el('tPass').value.trim(); if(pass) body.pass = pass;
       if(!body.name || !body.user){ toast('أكمل الاسم واسم الدخول'); return; }
+      if(!t && (!pass || pass.length < 6)){ toast('اختر كلمة مرور للمعلم (6 خانات فأكثر)'); return; }
+      if(t && pass && pass.length < 6){ toast('كلمة المرور الجديدة قصيرة (6 خانات فأكثر)'); return; }
       try{ await api(t?'/api/teachers/'+t.id:'/api/teachers', { method:t?'PUT':'POST', body }); closeModal(); go('teachers'); toast(t?'تم الحفظ ✅':'تمت الإضافة ✅'); }
       catch(e){ toast(e.message); }
     }}, { t:'إلغاء', cls:'btn ghost', fn:closeModal }]);

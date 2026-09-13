@@ -8,12 +8,55 @@
      · صلاحيات المعلم مفروضة في السيرفر لا في الواجهة فقط
    ============================================================ */
 const fs = require('fs');
+const os = require('os');
 const path = require('path');
 const { spawn } = require('child_process');
 
 const PORT = 4599;
 const BASE = 'http://127.0.0.1:' + PORT;
-const ROSTER = path.join(__dirname, '..', 'data', 'سجل-الطلاب-300.xlsx');
+const N = 300;                                    // عدد صفوف عيّنة الاختبار
+const TMP = fs.mkdtempSync(path.join(os.tmpdir(), 'andlus-audit-'));
+const ROSTER = path.join(TMP, 'سجل-اختبار.xlsx');
+const IDS_ONLY = path.join(TMP, 'هويات-اختبار.xlsx');
+
+/* عيّنة اختبار تُولَّد وقت التشغيل وتُحذف بعده —
+   لا بيانات وهمية مخزّنة في المشروع، ولا أسماء تشبه أشخاصاً حقيقيين */
+async function makeFixtures(){
+  const ExcelJS = require('exceljs');
+  const SUBJ = ['الرياضيات','العلوم','اللغة العربية','اللغة الإنجليزية','الدراسات الإسلامية','الاجتماعيات'];
+
+  const wb = new ExcelJS.Workbook();
+  const ws = wb.addWorksheet('السجل', { views:[{ rightToLeft:true }] });
+  ws.columns = [
+    { header:'رقم الطالب', key:'id' }, { header:'اسم الطالب', key:'name' },
+    { header:'الصف', key:'level' }, { header:'الفصل', key:'section' },
+    { header:'ولي الأمر', key:'guardian' }, { header:'هوية ولي الأمر', key:'guardianId' },
+    { header:'نسبة الحضور', key:'att' },
+    ...SUBJ.map(s => ({ header:s, key:s })),
+    { header:'ملاحظات المعلم', key:'notes' },
+  ];
+  for(let i = 1; i <= N; i++){
+    const row = { id:'ST'+(1000+i), name:'طالب اختبار '+i, level:'الأول متوسط',
+      section:'1/'+'أبج'[i % 3], guardian:'وليّ اختبار '+i, guardianId:String(1050000000 + i),
+      att:70 + (i % 31), notes:'ملاحظة اختبار' };
+    SUBJ.forEach((s,j) => { row[s] = 60 + ((i + j * 7) % 41); });
+    ws.addRow(row);
+  }
+  await wb.xlsx.writeFile(ROSTER);
+
+  /* ملف هويات فقط — بلا أعمدة درجات */
+  const wb2 = new ExcelJS.Workbook();
+  const ws2 = wb2.addWorksheet('الهويات', { views:[{ rightToLeft:true }] });
+  ws2.columns = [
+    { header:'رقم الطالب', key:'id' }, { header:'اسم الطالب', key:'name' },
+    { header:'الصف', key:'level' }, { header:'الفصل', key:'section' },
+    { header:'ولي الأمر', key:'guardian' }, { header:'هوية ولي الأمر', key:'guardianId' },
+  ];
+  for(let i = 1; i <= 5; i++)
+    ws2.addRow({ id:'HD'+(2000+i), name:'هوية اختبار '+i, level:'الثاني متوسط',
+      section:'2/أ', guardian:'وليّ هوية '+i, guardianId:String(1060000000 + i) });
+  await wb2.xlsx.writeFile(IDS_ONLY);
+}
 
 let pass = 0, fail = 0;
 const results = [];
@@ -45,6 +88,7 @@ async function waitUp(ms = 20000){
 
 (async () => {
   /* ملف بيانات معزول — لا نلمس بيانات التطوير */
+  await makeFixtures();
   const tmpData = path.join(__dirname, '..', 'server', 'data.json');
   const backup = tmpData + '.audit-bak';
   if(fs.existsSync(tmpData)) fs.copyFileSync(tmpData, backup);
@@ -74,30 +118,30 @@ async function waitUp(ms = 20000){
     check('«الطلاب» = 0 عند عدم وجود سجل', stu.students.length === 0, String(stu.students.length));
 
     /* ---------- 3. استيراد السجل ---------- */
-    if(!fs.existsSync(ROSTER)) throw new Error('ملف السجل غير موجود: ' + ROSTER);
+
     const fd = new FormData();
-    fd.append('file', new Blob([fs.readFileSync(ROSTER)]), 'سجل-الطلاب-300.xlsx');
+    fd.append('file', new Blob([fs.readFileSync(ROSTER)]), 'سجل-اختبار.xlsx');
     fd.append('mode', 'replace');
     const imp = await req('POST', '/api/roster/import', { token:A, form:fd });
-    check('استيراد ملف 300 طالب', imp.json && imp.json.ok && imp.json.count === 300, JSON.stringify(imp.json && imp.json.count));
+    check('استيراد ملف '+N+' طالب', imp.json && imp.json.ok && imp.json.count === N, JSON.stringify(imp.json && imp.json.count));
 
     st = (await req('GET', '/api/roster/stats', { token:A })).json;
     stu = (await req('GET', '/api/students', { token:A })).json;
-    check('«سجل الطلاب» يقول 300', st.ready && st.count === 300, String(st.count));
+    check('«سجل الطلاب» يقول '+N, st.ready && st.count === N, String(st.count));
     check('اسم الملف العربي يظهر سليماً (لا ترميز مشوّه)',
       /[؀-ۿ]/.test(st.fileName || '') && !/[À-ÿ]/.test(st.fileName || ''), st.fileName);
 
     /* استيراد ثانٍ بوضع «استبدال» لا يترك بطاقة مكرّرة */
     const fdDup = new FormData();
-    fdDup.append('file', new Blob([fs.readFileSync(ROSTER)]), 'سجل-الطلاب-300.xlsx');
+    fdDup.append('file', new Blob([fs.readFileSync(ROSTER)]), 'سجل-اختبار.xlsx');
     fdDup.append('mode', 'replace');
     await req('POST', '/api/roster/import', { token:A, form:fdDup });
     const dupFiles = (await req('GET', '/api/files', { token:A })).json.files;
     check('«استبدال الكل» لا يكرّر بطاقة السجل',
       dupFiles.filter(f => f.subject === 'سجل الطلاب').length === 1,
       String(dupFiles.filter(f => f.subject === 'سجل الطلاب').length));
-    check('«الطلاب» يقول 300 أيضاً (لا تناقض)', stu.students.length === 300, String(stu.students.length));
-    check('«الطلاب» يميّز مصدر السجل', stu.rosterCount === 300 && stu.manualCount === 0,
+    check('«الطلاب» يقول '+N+' أيضاً (لا تناقض)', stu.students.length === N, String(stu.students.length));
+    check('«الطلاب» يميّز مصدر السجل', stu.rosterCount === N && stu.manualCount === 0,
       `roster=${stu.rosterCount} manual=${stu.manualCount}`);
 
     /* ---------- 4. تعديل طالب من السجل ينعكس على الفهرس ---------- */
@@ -115,7 +159,7 @@ async function waitUp(ms = 20000){
     const del = await req('DELETE', '/api/students/' + kid.id, { token:A });
     check('حذف طالب من السجل', del.status === 200 && del.json.from === 'roster', JSON.stringify(del.json));
     st = (await req('GET', '/api/roster/stats', { token:A })).json;
-    check('عدد السجل نقص بعد الحذف', st.count === 299, String(st.count));
+    check('عدد السجل نقص بعد الحذف', st.count === N-1, String(st.count));
     if(P){
       const kids = await req('GET', '/api/children', { token:P });
       const gone = kids.status === 401 || (kids.json && kids.json.children.length === 0);
@@ -128,7 +172,7 @@ async function waitUp(ms = 20000){
     check('بطاقة ملف السجل موجودة في مركز الملفات', !!rosterFile);
     const df = await req('DELETE', '/api/files/' + rosterFile.id, { token:A });
     check('حذف ملف السجل ينجح', df.status === 200, 'status ' + df.status);
-    check('حذف الملف مسح السجل معه', df.json.clearedRoster === 299, String(df.json.clearedRoster));
+    check('حذف الملف مسح السجل معه', df.json.clearedRoster === N-1, String(df.json.clearedRoster));
     st = (await req('GET', '/api/roster/stats', { token:A })).json;
     check('البوت لم يعد يدّعي وجود سجل', st.ready === false && st.count === 0, JSON.stringify(st));
     stu = (await req('GET', '/api/students', { token:A })).json;
@@ -138,11 +182,11 @@ async function waitUp(ms = 20000){
 
     /* ---------- 7. زر «حذف السجل» المستقل ---------- */
     const fd2 = new FormData();
-    fd2.append('file', new Blob([fs.readFileSync(ROSTER)]), 'سجل-الطلاب-300.xlsx');
+    fd2.append('file', new Blob([fs.readFileSync(ROSTER)]), 'سجل-اختبار.xlsx');
     fd2.append('mode', 'replace');
     await req('POST', '/api/roster/import', { token:A, form:fd2 });
     const clr = await req('POST', '/api/roster/clear', { token:A });
-    check('زر «حذف السجل» يعمل', clr.status === 200 && clr.json.cleared === 300, JSON.stringify(clr.json));
+    check('زر «حذف السجل» يعمل', clr.status === 200 && clr.json.cleared === N, JSON.stringify(clr.json));
     st = (await req('GET', '/api/roster/stats', { token:A })).json;
     check('بعد «حذف السجل»: لا ادّعاء بيانات', st.ready === false && st.count === 0, JSON.stringify(st));
     files = (await req('GET', '/api/files', { token:A })).json.files;
@@ -169,18 +213,18 @@ async function waitUp(ms = 20000){
 
     /* ---------- 9. فرض الصلاحيات في السيرفر ---------- */
     const nt = await req('POST', '/api/teachers', { token:A,
-      body:{ name:'معلم بلا صلاحيات', user:'noperm', pass:'1234', perms:[] } });
+      body:{ name:'معلم بلا صلاحيات', user:'noperm', pass:'audit-pass-2026', perms:[] } });
     check('إنشاء معلم بلا صلاحيات', nt.status === 200, 'status ' + nt.status);
-    const nl = await req('POST', '/api/login', { body:{ role:'teacher', user:'noperm', pass:'1234' } });
-    const N = nl.json && nl.json.token;
-    const blocked = await req('POST', '/api/files', { token:N, form:(()=>{ const f=new FormData(); f.append('name','ممنوع'); f.append('content','x'); return f; })() });
+    const nl = await req('POST', '/api/login', { body:{ role:'teacher', user:'noperm', pass:'audit-pass-2026' } });
+    const NP = nl.json && nl.json.token;
+    const blocked = await req('POST', '/api/files', { token:NP, form:(()=>{ const f=new FormData(); f.append('name','ممنوع'); f.append('content','x'); return f; })() });
     check('معلم بلا صلاحية «files» يُمنع من الرفع', blocked.status === 403, 'status ' + blocked.status);
-    const blocked2 = await req('GET', '/api/contacts', { token:N });
+    const blocked2 = await req('GET', '/api/contacts', { token:NP });
     check('معلم بلا صلاحية «messages» يُمنع من جهات الاتصال', blocked2.status === 403, 'status ' + blocked2.status);
 
     /* ---------- 10. دخول وليّ الأمر: كل صيغ الرقم ---------- */
     await req('POST', '/api/roster/import', { token:A, form:(()=>{ const f=new FormData();
-      f.append('file', new Blob([fs.readFileSync(ROSTER)]), 'سجل-الطلاب-300.xlsx'); f.append('mode','replace'); return f; })() });
+      f.append('file', new Blob([fs.readFileSync(ROSTER)]), 'سجل-اختبار.xlsx'); f.append('mode','replace'); return f; })() });
     const row = (await req('GET', '/api/roster/search?q=&page=1&per=1', { token:A })).json.rows[0];
     const gid = row.guardianId, sid = row.id;
     const toAr = s => String(s).replace(/[0-9]/g, d => String.fromCharCode(0x0660 + (+d)));
@@ -233,11 +277,11 @@ async function waitUp(ms = 20000){
 
     /* ---------- 13. ملف فيه هويات يُرفع لأي خانة = تسجيل تلقائي ---------- */
     await req('POST', '/api/roster/clear', { token:A });
-    const idsFile = path.join(__dirname, '..', 'data', 'نموذج-ملف-الهويات.xlsx');
+    const idsFile = IDS_ONLY;
     if(fs.existsSync(idsFile)){
       const bf = new FormData();
       bf.append('brain', '1'); bf.append('name', 'ملف فيه هويات');
-      bf.append('file', new Blob([fs.readFileSync(idsFile)]), 'نموذج-ملف-الهويات.xlsx');
+      bf.append('file', new Blob([fs.readFileSync(idsFile)]), 'هويات-اختبار.xlsx');
       const bu = await req('POST', '/api/files', { token:A, form:bf });
       check('رفع ملف هويات لخانة عقل البوت ينجح', bu.status === 200, 'status ' + bu.status);
       const st13 = (await req('GET', '/api/roster/stats', { token:A })).json;
@@ -251,12 +295,12 @@ async function waitUp(ms = 20000){
     }
 
     /* ---------- 14. المعلم: يرى ملفاته فقط ---------- */
-    const t14 = await req('POST', '/api/teachers', { token:A, body:{ name:'معلم ب', user:'tb', pass:'1234', perms:['files','messages'] } });
-    const TB = (await req('POST', '/api/login', { body:{ role:'teacher', user:'tb', pass:'1234' } })).json.token;
+    const t14 = await req('POST', '/api/teachers', { token:A, body:{ name:'معلم ب', user:'tb', pass:'audit-pass-2026', perms:['files','messages'] } });
+    const TB = (await req('POST', '/api/login', { body:{ role:'teacher', user:'tb', pass:'audit-pass-2026' } })).json.token;
     const f14 = new FormData(); f14.append('name','ملف المعلم ب'); f14.append('content','خاص');
     await req('POST', '/api/files', { token:TB, form:f14 });
-    const t14b = await req('POST', '/api/teachers', { token:A, body:{ name:'معلم ج', user:'tc', pass:'1234', perms:['files','messages'] } });
-    const TC = (await req('POST', '/api/login', { body:{ role:'teacher', user:'tc', pass:'1234' } })).json.token;
+    const t14b = await req('POST', '/api/teachers', { token:A, body:{ name:'معلم ج', user:'tc', pass:'audit-pass-2026', perms:['files','messages'] } });
+    const TC = (await req('POST', '/api/login', { body:{ role:'teacher', user:'tc', pass:'audit-pass-2026' } })).json.token;
     const seenByC = (await req('GET', '/api/files', { token:TC })).json.files;
     check('المعلم لا يرى ملفات معلم آخر', !seenByC.some(f => f.name === 'ملف المعلم ب'), String(seenByC.length));
     const bFiles = (await req('GET', '/api/files', { token:TB })).json.files;
@@ -282,7 +326,7 @@ async function waitUp(ms = 20000){
 
     /* ---------- 16. إعادة التعيين تمسح كل شيء ---------- */
     await req('POST', '/api/roster/import', { token:A, form:(()=>{ const f=new FormData();
-      f.append('file', new Blob([fs.readFileSync(ROSTER)]), 'سجل-الطلاب-300.xlsx'); f.append('mode','replace'); return f; })() });
+      f.append('file', new Blob([fs.readFileSync(ROSTER)]), 'سجل-اختبار.xlsx'); f.append('mode','replace'); return f; })() });
     await req('POST', '/api/reset', { token:A });
     const a2 = await req('POST', '/api/login', { body:{ role:'admin', user:'naif', pass:'43321' } });
     const A2 = a2.json && a2.json.token;
@@ -296,6 +340,7 @@ async function waitUp(ms = 20000){
     await new Promise(r => setTimeout(r, 400));
     try{ fs.unlinkSync(tmpData); }catch(_){}
     if(fs.existsSync(backup)){ fs.copyFileSync(backup, tmpData); fs.unlinkSync(backup); }
+    try{ fs.rmSync(TMP, { recursive:true, force:true }); }catch(_){}   // لا تبقى عيّنات على القرص
 
     console.log('\n=== تدقيق التناقضات بين الخانات ===\n');
     console.log(results.join('\n'));
