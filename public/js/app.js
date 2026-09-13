@@ -213,7 +213,7 @@ async function enterApp(){
   buildNav();
   await refreshNotifBadge();
   if(ME.role !== 'parent') await refreshMsgBadge();
-  go(NAV[ME.role][0].id);
+  go(navFor(ME.role)[0].id);
 }
 const NAV = {
   parent:[{ id:'chat', t:'المساعد الذكي', ic:I.chat }, { id:'children', t:'أبنائي', ic:I.student }],
@@ -221,11 +221,20 @@ const NAV = {
   admin:[{ id:'dash', t:'الرئيسية', ic:I.home }, { id:'chat', t:'المساعد الذكي', ic:I.chat }, { id:'roster', t:'سجل الطلاب', ic:I.student }, { id:'teachers', t:'المعلمون', ic:I.teacher }, { id:'students', t:'الطلاب', ic:I.student }, { id:'afiles', t:'مركز الملفات', ic:I.files }, { id:'brain', t:'عقل البوت', ic:I.bot }, { id:'messages', t:'المراسلة', ic:I.msg }],
 };
 let CUR = '';
+/* قائمة الدور بعد تطبيق صلاحيات المدير على المعلم (لا نعرض خانة ممنوعة) */
+const NEED = { tfiles:'files', messages:'messages' };
+function navFor(role){
+  const items = NAV[role] || [];
+  if(role !== 'teacher') return items;
+  const perms = ME.perms || [];
+  const out = items.filter(it => !NEED[it.id] || perms.includes(NEED[it.id]));
+  return out.length ? out : [items[0]];
+}
 function buildNav(){
   const nav = el('navMenu'); nav.innerHTML = '';
   const ind = document.createElement('div'); ind.className = 'nav-indicator'; ind.id = 'navInd';
   nav.appendChild(ind);
-  NAV[ME.role].forEach(item => {
+  navFor(ME.role).forEach(item => {
     const b = document.createElement('button'); b.className = 'nav-item'; b.dataset.id = item.id;
     b.innerHTML = item.ic + '<span>'+item.t+'</span>';
     if(item.id === 'messages') b.innerHTML += '<span class="badge red hidden" id="msgNavBadge">0</span>';
@@ -244,6 +253,8 @@ function moveNavIndicator(){
 }
 addEventListener('resize', () => moveNavIndicator());
 function go(id){
+  const allowed = navFor(ME.role).map(i=>i.id);
+  if(!allowed.includes(id)) id = allowed[0];   // لا نفتح خانة خارج صلاحيات الدور
   CUR = id;
   document.querySelectorAll('.nav-item').forEach(n => n.classList.toggle('active', n.dataset.id === id));
   moveNavIndicator();
@@ -251,7 +262,13 @@ function go(id){
   const map = { chat:renderChat, children:renderChildren, tfiles:renderTeacherFiles, messages:renderMessages, dash:renderDash, teachers:renderTeachers, students:renderStudents, afiles:renderAdminFiles, brain:renderBrain, roster:renderRoster };
   v.innerHTML = '<div class="empty-state">'+I.bot+'<p>جارٍ التحميل...</p></div>';
   v.classList.remove('view-in'); void v.offsetWidth; v.classList.add('view-in');
-  (map[id] || (()=> v.innerHTML=''))(v);
+  const fn = map[id] || (()=> { v.innerHTML=''; });
+  // خطأ في التحميل لا يجوز يترك الشاشة معلّقة على «جارٍ التحميل»
+  Promise.resolve().then(()=> fn(v)).catch(e=>{
+    v.innerHTML = `<div class="card card-pad empty-state" style="min-height:180px">${I.bot}
+      <p>تعذّر تحميل هذه الخانة</p><p class="small muted">${esc(e.message||'خطأ غير معروف')}</p>
+      <button class="btn ghost mt" onclick="go('${esc(id)}')">إعادة المحاولة</button></div>`;
+  });
 }
 
 /* ============================================================
@@ -342,9 +359,17 @@ async function renderChat(v){
     botSay(rst.ready
       ? `أهلاً 👋 حفظت سجل <b>${rst.count} طالب</b> — اسألني عن أي طالب أو إحصائية وأجيب فوراً.`
       : `أهلاً 👋 لم يُستورد سجل الطلاب بعد. افتح <b>سجل الطلاب</b> واستورد ملف الإكسل.`);
-    const w = document.createElement('div'); w.className='suggest';
-    ['👥 كم عدد الطلاب؟','🏆 أفضل 10 طلاب','📊 متوسط كل مادة'].forEach(t=>{ const b=document.createElement('button');b.textContent=t;b.onclick=()=>{el('chatIn').value=t.replace(/^[^ ]+ /,'');sendChat();};w.appendChild(b); });
-    st.appendChild(w); return;
+    // اقتراحات لا تُعرض إلا إذا كانت البيانات موجودة فعلاً (لا نعد بما لا يقدر عليه)
+    if(rst.ready){
+      const w = document.createElement('div'); w.className='suggest';
+      ['👥 كم عدد الطلاب؟','🏆 أفضل 10 طلاب','📊 متوسط كل مادة'].forEach(t=>{ const b=document.createElement('button');b.textContent=t;b.onclick=()=>{el('chatIn').value=t.replace(/^[^ ]+ /,'');sendChat();};w.appendChild(b); });
+      st.appendChild(w);
+    } else if(ME.role === 'admin'){
+      const w = document.createElement('div'); w.className='suggest';
+      const b = document.createElement('button'); b.textContent = '📥 اذهب إلى سجل الطلاب';
+      b.onclick = () => go('roster'); w.appendChild(b); st.appendChild(w);
+    }
+    return;
   }
 
   // وليّ الأمر: قائمة المحادثات + استئناف
@@ -429,6 +454,7 @@ async function renderRoster(v){
           <button class="btn" id="rosterSmart" title="الوكيل يقرأ الملف ويفصل الهويات والأسماء والمواد تلقائياً">🤖 تحليل ذكي</button>
           <button class="btn gold" id="rosterReplace" title="يمسح السجل الحالي ويضع الملف الجديد بدله">⬆️ استبدال الكل</button>
           <button class="btn ghost" id="rosterMerge" title="يدمج الملف مع السجل الحالي (يضيف طلاب/درجات بمطابقة رقم الطالب)">＋ إضافة/دمج</button>
+          ${info.ready ? `<button class="btn danger" id="rosterClear" title="يمسح السجل من الذاكرة ويحذف ملفه — بعدها يصرّح البوت أنه لا يوجد سجل">🗑 حذف السجل</button>` : ''}
         </div>
       </div>
       <p class="small muted" style="margin:10px 2px 0">💡 <b>استبدال الكل</b>: ملف كامل جديد. · <b>إضافة/دمج</b>: يدمج بمطابقة «رقم الطالب». · <b>تحليل ذكي</b>: الوكيل يفصل الأعمدة بنفسه.</p>
@@ -466,6 +492,7 @@ async function renderRoster(v){
   el('rosterSmart').onclick = smartImport;
   el('rosterReplace').onclick = () => doImport('replace');
   el('rosterMerge').onclick = () => doImport('merge');
+  if(el('rosterClear')) el('rosterClear').onclick = clearRoster;
   el('idTemplate').onclick = downloadIdTemplate;
   el('idUpload').onclick = uploadIdentities;
   animateCounts();
@@ -473,6 +500,16 @@ async function renderRoster(v){
   if(sb){ let t; sb.oninput = () => { clearTimeout(t); t = setTimeout(()=>{ rosterQ = sb.value.trim(); rosterPage = 1; loadRosterTable(); }, 250); }; }
   if(info.ready) loadRosterTable();
   else el('rosterTable').innerHTML = `<div class="empty-state small">استورد ملف الإكسل أولاً</div>`;
+}
+/* حذف السجل نهائياً — يمسح الذاكرة وملف السجل فلا يبقى تناقض */
+async function clearRoster(){
+  if(!confirm('حذف سجل الطلاب بالكامل؟\nسيُمسح من ذاكرة البوت ويُحذف ملفه، ولن يعرف أي طالب بعدها.')) return;
+  const b = el('rosterClear'); b.disabled = true; b.textContent = 'يحذف...';
+  try{
+    const r = await api('/api/roster/clear', { method:'POST' });
+    toast(`تم حذف السجل (${r.cleared} طالب) ✅`);
+    rosterPage = 1; rosterQ = ''; go('roster');
+  }catch(e){ toast(e.message); b.disabled = false; b.textContent = '🗑 حذف السجل'; }
 }
 /* تحميل نموذج ملف الهويات */
 async function downloadIdTemplate(){
@@ -830,9 +867,21 @@ async function viewFile(id){
       { t:'✖ رفض', cls:'btn danger', fn: async () => { await api('/api/files/'+id, { method:'PUT', body:{ status:'rejected' } }); closeModal(); refreshView(); toast('تم رفض الملف'); } },
       { t:'✏️ تعديل', cls:'btn ghost', fn: () => editFile(f) },
       { t:'✉️ مراسلة المعلم', cls:'btn gold', fn: () => { closeModal(); go('messages'); setTimeout(()=>openThread(f.owner), 200); } },
+      { t:'🗑 حذف', cls:'btn danger', fn: () => delFile(f) },
     ];
   }
   modal('عرض الملف', body, btns);
+}
+/* حذف ملف نهائياً — وينبّه إن كان هو مصدر سجل الطلاب */
+async function delFile(f){
+  const isRoster = f.subject === 'سجل الطلاب';
+  const warn = isRoster ? '\n⚠️ هذا ملف سجل الطلاب — سيُمسح السجل من ذاكرة البوت أيضاً.' : '';
+  if(!confirm(`حذف «${f.name}» نهائياً؟ لا يمكن التراجع.${warn}`)) return;
+  try{
+    const r = await api('/api/files/'+f.id, { method:'DELETE' });
+    closeModal(); refreshView();
+    toast(r.clearedRoster ? `تم حذف الملف ومسح السجل (${r.clearedRoster} طالب) ✅` : 'تم حذف الملف ✅');
+  }catch(e){ toast(e.message); }
 }
 function editFile(f){
   modal('تعديل الملف', `<div class="field"><label>الاسم</label><input id="edName" value="${esc(f.name)}"></div><div class="field"><label>المحتوى</label><textarea id="edC" rows="8">${esc(f.content||'')}</textarea></div>`,
@@ -917,32 +966,69 @@ async function delTeacher(id){ if(confirm('حذف هذا المعلم؟ لا ي�
 /* ============================================================
    ADMIN — students
    ============================================================ */
+let studPage = 1, studQ = '';
 async function renderStudents(v){
-  const { students, parents } = await api('/api/students');
-  v.innerHTML = `<div class="page-head flex between center wrap gap"><div><h2>الطلاب والدرجات</h2><p>عرض وتعديل بيانات الطلاب ودرجاتهم</p></div>
+  const { students, parents, rosterCount, manualCount } = await api('/api/students');
+  const q = studQ.toLowerCase();
+  const all = q ? students.filter(s=> (s.name||'').toLowerCase().includes(q) || (s.id||'').toLowerCase().includes(q)) : students;
+  const per = 24, pages = Math.max(1, Math.ceil(all.length/per));
+  if(studPage > pages) studPage = pages;
+  const list = all.slice((studPage-1)*per, studPage*per);
+  v.innerHTML = `<div class="page-head flex between center wrap gap"><div><h2>الطلاب والدرجات</h2>
+      <p>${students.length ? `${students.length} طالب — ${rosterCount} من السجل المستورد و${manualCount} مُضاف يدوياً` : 'لا يوجد طلاب — استورد ملف السجل أو أضف طالباً'}</p></div>
       <button class="btn gold" id="addS">＋ إضافة طالب</button></div>
-    <div class="grid">${students.map(s=>{
-      const avg = Math.round(Object.values(s.grades).reduce((a,b)=>a+b,0)/(Object.values(s.grades).length||1));
+    ${students.length ? `<div class="flex between center wrap gap mb">
+      <input id="studSearch" placeholder="ابحث بالاسم أو رقم الطالب..." value="${esc(studQ)}" style="flex:1;min-width:200px;max-width:340px;padding:10px 14px;border:1.5px solid var(--line);border-radius:12px">
+      <span class="small muted">${all.length} نتيجة · صفحة ${studPage} من ${pages}</span></div>` : ''}
+    <div class="grid">${list.length ? list.map(s=>{
+      const avg = Math.round(Object.values(s.grades||{}).reduce((a,b)=>a+b,0)/(Object.values(s.grades||{}).length||1)) || 0;
+      const initial = (s.name||'؟').trim().charAt(0) || '؟';
+      const src = s.source==='roster' ? `<span class="tag approved" title="من ملف السجل المستورد">السجل</span>` : `<span class="tag pending" title="مُضاف يدوياً">يدوي</span>`;
       return `<div class="card card-pad"><div class="flex between center wrap gap mb">
-        <div class="flex center gap"><div class="avatar" style="width:42px;height:42px;border-radius:12px">${esc(s.name[0])}</div><div><b style="font-size:16px">${esc(s.name)}</b><div class="small muted">${esc(s.grade)} · ${esc(s.classNo)} · حضور ${s.attendance}%</div></div></div>
-        <div class="flex gap"><span class="chip">المعدل ${avg}%</span><button class="btn ghost sm" onclick='openStudent(${JSON.stringify(s)},${JSON.stringify(parents)})'>تعديل</button></div></div>
-        <div class="flex gap wrap">${Object.entries(s.grades).map(([k,val])=>`<span class="tag ${val>=90?'approved':val>=70?'pending':'rejected'}">${esc(k.split(' ')[0])}: ${val}</span>`).join('')}</div></div>`;
-    }).join('')}</div>`;
+        <div class="flex center gap"><div class="avatar" style="width:42px;height:42px;border-radius:12px">${esc(initial)}</div><div><b style="font-size:16px">${esc(s.name||'—')}</b><div class="small muted">${esc(s.id)} · ${esc(s.grade||'—')} · ${esc(s.classNo||'—')} · حضور ${s.attendance||0}%</div></div></div>
+        <div class="flex gap center">${src}<span class="chip">المعدل ${avg}%</span>
+        <button class="btn ghost sm" onclick='openStudent(${esc(JSON.stringify(s))},${esc(JSON.stringify(parents))})'>تعديل</button>
+        <button class="btn danger sm" onclick="delStudent('${esc(s.id)}')">حذف</button></div></div>
+        <div class="flex gap wrap">${Object.entries(s.grades||{}).map(([k,val])=>`<span class="tag ${val>=90?'approved':val>=70?'pending':'rejected'}">${esc(String(k).split(' ')[0])}: ${val}</span>`).join('') || '<span class="small muted">لا درجات مسجّلة</span>'}</div></div>`;
+    }).join('') : emptyBox(students.length ? 'لا نتائج للبحث.' : 'لا يوجد طلاب بعد — استورد ملف السجل من «سجل الطلاب» أو أضف طالباً يدوياً.')}</div>
+    ${pages>1 ? `<div class="flex between center mt"><button class="btn ghost sm" ${studPage<=1?'disabled':''} onclick="studGo(${studPage-1})">السابق</button>
+      <span class="small muted">${studPage} / ${pages}</span>
+      <button class="btn ghost sm" ${studPage>=pages?'disabled':''} onclick="studGo(${studPage+1})">التالي</button></div>` : ''}`;
   el('addS').onclick = () => openStudent(null, parents);
+  const sb = el('studSearch');
+  if(sb){ let t; sb.oninput = () => { clearTimeout(t); t = setTimeout(()=>{ studQ = sb.value.trim(); studPage = 1; renderStudents(v); }, 250); }; }
+}
+function studGo(p){ studPage = p; renderStudents(el('mainView')); }
+async function delStudent(id){
+  if(!confirm('حذف هذا الطالب نهائياً؟\nسيُحذف من السجل ومن حسابات أولياء الأمور ومن المحادثات المحفوظة.')) return;
+  try{ await api('/api/students/'+id, { method:'DELETE' }); toast('تم حذف الطالب ✅'); renderStudents(el('mainView')); }
+  catch(e){ toast(e.message); }
 }
 function openStudent(s, parents){
+  const fromRoster = !!(s && s.source === 'roster');
+  // مواد النموذج = مواد المدرسة + أي مادة فعلية في سجل هذا الطالب
+  const subs = Array.from(new Set([...(s ? Object.keys(s.grades||{}) : []), ...SUBJECTS]));
+  const guardianField = fromRoster
+    ? `<div class="grid cols2"><div class="field"><label>ولي الأمر</label><input id="sGuardian" value="${esc(s.guardian||'')}" placeholder="اسم ولي الأمر"></div>
+        <div class="field"><label>هوية ولي الأمر (يدخل بها)</label><input id="sGuardianId" value="${esc(s.guardianId||'')}" inputmode="numeric"></div></div>`
+    : `<div class="field"><label>ولي الأمر</label><select id="sParent">${parents.length ? parents.map(p=>`<option value="${p.id}" ${s&&s.parent===p.id?'selected':''}>${esc(p.name)}</option>`).join('') : '<option value="">لا يوجد أولياء أمور مسجّلون</option>'}</select></div>`;
   modal(s?'تعديل الطالب':'إضافة طالب', `
+    ${fromRoster ? `<p class="small muted" style="margin:0 0 10px">🗂 هذا الطالب من ملف السجل المستورد — التعديل يُحدّث السجل وذاكرة البوت فوراً.</p>` : ''}
     <div class="grid cols2"><div class="field"><label>اسم الطالب</label><input id="sName" value="${s?esc(s.name):''}"></div>
-      <div class="field"><label>الصف</label><input id="sGrade" value="${s?esc(s.grade):''}" placeholder="الأول متوسط"></div>
-      <div class="field"><label>الفصل</label><input id="sClass" value="${s?esc(s.classNo):''}" placeholder="1/أ"></div>
-      <div class="field"><label>نسبة الحضور %</label><input id="sAtt" type="number" value="${s?s.attendance:95}"></div></div>
-    <div class="field"><label>ولي الأمر</label><select id="sParent">${parents.map(p=>`<option value="${p.id}" ${s&&s.parent===p.id?'selected':''}>${esc(p.name)}</option>`).join('')}</select></div>
+      <div class="field"><label>الصف</label><input id="sGrade" value="${s?esc(s.grade||''):''}" placeholder="الأول متوسط"></div>
+      <div class="field"><label>الفصل</label><input id="sClass" value="${s?esc(s.classNo||''):''}" placeholder="1/أ"></div>
+      <div class="field"><label>نسبة الحضور %</label><input id="sAtt" type="number" value="${s?(s.attendance||0):95}"></div></div>
+    ${guardianField}
     <label class="small" style="font-weight:700;color:var(--muted)">الدرجات</label>
-    <div class="perm-grid mt">${SUBJECTS.map(sub=>`<label style="justify-content:space-between">${sub}<input type="number" data-subj="${sub}" style="width:70px;padding:5px;border:1px solid var(--line);border-radius:8px" value="${s&&s.grades[sub]!=null?s.grades[sub]:85}"></label>`).join('')}</div>
+    <div class="perm-grid mt">${subs.map(sub=>`<label style="justify-content:space-between">${esc(sub)}<input type="number" data-subj="${esc(sub)}" style="width:70px;padding:5px;border:1px solid var(--line);border-radius:8px" value="${s&&s.grades&&s.grades[sub]!=null?s.grades[sub]:''}" placeholder="—"></label>`).join('')}</div>
     <div class="field mt"><label>ملاحظات المعلم</label><textarea id="sNotes" rows="2">${s?esc(s.notes||''):''}</textarea></div>`,
     [{ t:s?'حفظ':'إضافة', cls:'btn', fn: async () => {
-      const grades = {}; document.querySelectorAll('[data-subj]').forEach(i=> grades[i.dataset.subj] = +i.value||0);
-      const body = { name:el('sName').value.trim(), grade:el('sGrade').value.trim(), classNo:el('sClass').value.trim(), attendance:+el('sAtt').value, parent:el('sParent').value, grades, notes:el('sNotes').value.trim() };
+      const grades = {};
+      document.querySelectorAll('[data-subj]').forEach(i=>{ if(String(i.value).trim()!=='') grades[i.dataset.subj] = +i.value||0; });
+      const body = { name:el('sName').value.trim(), grade:el('sGrade').value.trim(), classNo:el('sClass').value.trim(),
+        attendance:+el('sAtt').value, grades, notes:el('sNotes').value.trim() };
+      if(fromRoster){ body.guardian = el('sGuardian').value.trim(); body.guardianId = el('sGuardianId').value.trim(); }
+      else if(el('sParent')) body.parent = el('sParent').value;
       if(!body.name){ toast('أدخل اسم الطالب'); return; }
       try{ await api(s?'/api/students/'+s.id:'/api/students', { method:s?'PUT':'POST', body }); closeModal(); go('students'); toast(s?'تم الحفظ ✅':'تمت الإضافة ✅'); }
       catch(e){ toast(e.message); }
@@ -956,7 +1042,7 @@ async function renderAdminFiles(v){
   const { files } = await api('/api/files');
   const filt = v.dataset.filt || 'all';
   const list = files.filter(f => filt==='all' ? true : f.status===filt);
-  v.innerHTML = `<div class="page-head"><h2>مركز الملفات</h2><p>راجع ملفات المعلمين — افتح، اقبل، ارفض، عدّل، أو راسل المعلم</p></div>
+  v.innerHTML = `<div class="page-head"><h2>مركز الملفات</h2><p>راجع ملفات المعلمين — افتح، اقبل، ارفض، عدّل، احذف، أو راسل المعلم</p></div>
     <div class="flex gap wrap mb">${['all','pending','approved','rejected'].map(k=>`<button class="btn ${filt===k?'':'ghost'} sm" onclick="filterFiles('${k}')">${{all:'الكل',pending:'قيد المراجعة',approved:'مقبول',rejected:'مرفوض'}[k]}</button>`).join('')}</div>
     <div class="grid">${list.length ? list.map(fileRow).join('') : emptyBox('لا توجد ملفات في هذا التصنيف.')}</div>`;
 }
@@ -1000,7 +1086,7 @@ async function renderMessages(v){
   const sum = {}; threads.forEach(t => sum[t.peer] = t);
   contacts.forEach(c => { if(sum[c.id]) unread[c.id] = sum[c.id].unread; });
   activeThread = activeThread && contacts.some(c=>c.id===activeThread) ? activeThread : (contacts[0] && contacts[0].id);
-  v.innerHTML = `<div class="page-head flex between center wrap gap"><div><h2>المراسلة 💬</h2><p>محادثات ومكالمات بين المعلمين والإدارة</p></div>
+  v.innerHTML = `<div class="page-head flex between center wrap gap"><div><h2>المراسلة 💬</h2><p>محادثات فورية بين المعلمين والإدارة</p></div>
       ${ME.role==='admin' ? `<button class="btn danger" id="clearMsgs">🗑️ مسح كل المحادثات</button>` : ''}</div>
     <div class="mgr"><div class="mgr-list" id="mgrList">${contacts.map(c=>{
       const s = sum[c.id]; const last = s && s.last; const u = unread[c.id]||0;
@@ -1100,7 +1186,8 @@ function timeAgo(ts){ const d=(Date.now()-ts)/1000; if(d<60)return'الآن'; if
 
 /* expose for inline onclick */
 function setChild(id){ activeChild = id; go('chat'); }
-Object.assign(window, { go, viewFile, filterFiles, openTeacher, delTeacher, openStudent, openThread, sendMsg, closeModal, setChild, rosterGo, openConvo, delConvo });
+Object.assign(window, { go, viewFile, filterFiles, openTeacher, delTeacher, openStudent, delStudent, studGo,
+  delFile, clearRoster, openThread, sendMsg, closeModal, setChild, rosterGo, openConvo, delConvo });
 
 /* ============================================================
    مؤشّر مخصّص — نقطة دقيقة + حلقة تتبع بتأخير، تكبر على العناصر

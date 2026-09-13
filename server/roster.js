@@ -177,6 +177,54 @@ async function importFile(filePath, fileName, mode = 'replace', mapping = null){
   return { count:students.length, subjects, ms:Date.now()-t0, mode, stats:IDX.stats };
 }
 
+/* مسح السجل والفهرس نهائياً (يحافظ على اتساق ما يقوله البوت) */
+function clear(){
+  IDX = { byId:new Map(), byName:new Map(), byClass:new Map(), list:[], subjects:[], stats:null, ready:false };
+  delete db.DB.roster;
+  db.saveNow();
+  return true;
+}
+
+/* إعادة بناء الفهرس والإحصاءات بعد أي تعديل على الطلاب + حفظ */
+function rebuild(){
+  const r = db.DB.roster;
+  if(!r || !Array.isArray(r.students) || !r.students.length){ return clear(); }
+  IDX = buildIndex(r.students, r.subjects || []);
+  r.count = r.students.length;
+  r.stats = IDX.stats;
+  db.saveNow();
+  return true;
+}
+
+/* تعديل طالب داخل السجل (يبقى الفهرس والإحصاءات متّسقين) */
+function updateStudent(id, patch){
+  const r = db.DB.roster;
+  if(!r || !Array.isArray(r.students)) return null;
+  const s = r.students.find(x => norm(x.id) === norm(id));
+  if(!s) return null;
+  ['name','level','section','guardian','guardianId','notes'].forEach(k => { if(patch[k] != null) s[k] = patch[k]; });
+  if(patch.attendance != null) s.attendance = Number(patch.attendance) || 0;
+  if(patch.grades && typeof patch.grades === 'object'){
+    s.grades = Object.assign(s.grades || {}, patch.grades);
+    Object.keys(patch.grades).forEach(k => { if(!r.subjects.includes(k)) r.subjects.push(k); });
+  }
+  const g = Object.values(s.grades || {}).filter(v => typeof v === 'number');
+  s.avg = g.length ? Math.round(g.reduce((a,b)=>a+b,0)/g.length) : 0;
+  rebuild();
+  return s;
+}
+
+/* حذف طالب من السجل */
+function removeStudent(id){
+  const r = db.DB.roster;
+  if(!r || !Array.isArray(r.students)) return false;
+  const before = r.students.length;
+  r.students = r.students.filter(x => norm(x.id) !== norm(id));
+  if(r.students.length === before) return false;
+  rebuild();
+  return true;
+}
+
 /* إعادة بناء الفهرس من data.json عند إقلاع السيرفر (بدون قراءة الإكسل) */
 function hydrate(){
   const r = db.DB.roster;
@@ -233,4 +281,8 @@ const get = (id) => IDX.byId.get(norm(id)) || null;
 /* طلاب وليّ أمر برقم هويته */
 const byGuardian = (gid) => { const g = norm(gid); return IDX.list.filter(s => norm(s.guardianId) === g); };
 
-module.exports = { importFile, hydrate, findStudents, classOf, search, stats, ready, count, norm, list, get, byGuardian };
+/* اسم الملف الذي بُني منه السجل (لربط حذف الملف بحذف السجل) */
+const sourceFile = () => (db.DB.roster && db.DB.roster.fileName) || null;
+
+module.exports = { importFile, hydrate, findStudents, classOf, search, stats, ready, count, norm, list, get,
+  byGuardian, clear, rebuild, updateStudent, removeStudent, sourceFile };

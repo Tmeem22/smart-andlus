@@ -58,10 +58,20 @@ function auth(req,res,next){
   req.user = u; req.token = t; next();
 }
 function requireRole(...roles){ return (req,res,next)=> roles.includes(req.user.role) ? next() : res.status(403).json({ error:'ممنوع' }); }
+/* صلاحيات المعلم يحدّدها المدير — نفرضها في السيرفر لا في الواجهة فقط */
+function requirePerm(perm){
+  return (req,res,next)=>{
+    if(req.user.role !== 'teacher') return next();
+    if((req.user.perms||[]).includes(perm)) return next();
+    res.status(403).json({ error:'هذه الصلاحية غير مفعّلة لحسابك — راجع إدارة المدرسة.' });
+  };
+}
+const hasPerm = (u, p)=> u.role !== 'teacher' || (u.perms||[]).includes(p);
 function publicUser(u){ const { pass, ...rest } = u; return rest; }
 
 /* ---------- إشعارات + مساعدات ---------- */
 function pushNotif(uid, text, sub){
+  if(!uid || !db.DB.users.some(u=>u.id===uid)) return null;   // لا إشعارات لحساب محذوف
   db.DB.notifs[uid] = db.DB.notifs[uid] || [];
   const n = { id:'n'+Date.now()+Math.random().toString(16).slice(2,6), text, sub, ts:Date.now(), read:false };
   db.DB.notifs[uid].unshift(n); saveDB();
@@ -69,7 +79,23 @@ function pushNotif(uid, text, sub){
   return n;
 }
 const tkey = (a,b)=> [a,b].sort().join('|');
-const avgOf = s => Math.round(Object.values(s.grades).reduce((a,b)=>a+b,0)/Object.values(s.grades).length);
+/* إزالة حسابات أولياء الأمور المؤقتة التي لم يبقَ لها أبناء (وجلساتها ومحادثاتها) */
+function pruneParents(){
+  const dead = db.DB.users.filter(u=> u.role==='parent' && u.virtual && !(u.children||[]).length).map(u=>u.id);
+  if(!dead.length) return 0;
+  const gone = new Set(dead);
+  db.DB.users = db.DB.users.filter(u=> !gone.has(u.id));
+  dead.forEach(id=>{ delete db.DB.convos[id]; delete db.DB.notifs[id]; });
+  Object.entries(db.DB.tokens).forEach(([tok,uid])=>{ if(gone.has(uid)) delete db.DB.tokens[tok]; });
+  return dead.length;
+}
+const avgOf = s => { const g = Object.values((s && s.grades) || {}).filter(v=>typeof v==='number');
+  return g.length ? Math.round(g.reduce((a,b)=>a+b,0)/g.length) : 0; };
+/* حذف نسخة الملف من القرص (بهدوء) — كي لا تتضخّم uploads بملفات بلا سجل */
+function rmUpload(p){
+  if(!p) return;
+  try{ fs.unlinkSync(path.join(__dirname,'..','public', p)); }catch(_){}
+}
 function contactsFor(u){
   if(u.role==='admin')   return db.DB.users.filter(x=>x.role==='teacher').map(publicUser);
   if(u.role==='teacher') return db.DB.users.filter(x=>x.role==='admin'||(x.role==='teacher'&&x.id!==u.id)).map(publicUser);
@@ -311,6 +337,24 @@ app.get('/api/roster/template', auth, requireRole('admin'), async (req,res)=>{
   }catch(e){ res.status(500).json({ error:'تعذّر توليد النموذج: '+e.message }); }
 });
 
+/* مسح السجل نهائياً — يمسح الفهرس وملف السجل معاً (لا تناقض بعدها) */
+app.post('/api/roster/clear', auth, requireRole('admin'), (req,res)=>{
+  const had = roster.count();
+  const src = roster.sourceFile();
+  roster.clear();
+  // أولياء الأمور المؤقتون كانوا مرتبطين بطلاب السجل — لا معنى لبقائهم
+  db.DB.users.forEach(u=>{ if(u.role==='parent' && u.virtual) u.children = []; });
+  pruneParents();
+  // احذف بطاقة ملف السجل من مركز الملفات حتى لا تبقى إشارة لسجل ممسوح
+  db.DB.files = db.DB.files.filter(f=>{
+    const isRoster = f.subject === 'سجل الطلاب' || (src && f.name === src);
+    if(isRoster) rmUpload(f.path);
+    return !isRoster;
+  });
+  db.saveNow();
+  res.json({ ok:true, cleared:had });
+});
+
 /* الوكيل الذكي: يحلّل ملفاً ويقترح خريطة الأعمدة (وقد يسأل بخيارات) */
 app.post('/api/roster/analyze', auth, requireRole('admin'), upload.single('file'), async (req,res)=>{
   if(!req.file) return res.status(400).json({ error:'اختر ملف إكسل (.xlsx)' });
@@ -369,15 +413,37 @@ app.put('/api/teachers/:id', auth, requireRole('admin'), (req,res)=>{
   saveDB(); res.json({ teacher: publicUser(t) });
 });
 app.delete('/api/teachers/:id', auth, requireRole('admin'), (req,res)=>{
-  db.DB.users = db.DB.users.filter(u=>u.id!==req.params.id);
-  saveDB(); res.json({ ok:true });
+  const id = req.params.id;
+  const t = db.DB.users.find(u=>u.id===id && u.role==='teacher');
+  if(!t) return res.status(404).json({ error:'غير موجود' });
+  db.DB.users = db.DB.users.filter(u=>u.id!==id);
+  // تنظيف ما يخلّفه المعلم: ملفاته، محادثاته، إشعاراته، وجلساته
+  const myFiles = db.DB.files.filter(f=>f.owner===id);
+  myFiles.forEach(f=> rmUpload(f.path));
+  db.DB.files = db.DB.files.filter(f=>f.owner!==id);
+  Object.keys(db.DB.threads).forEach(k=>{ if(k.split('|').includes(id)) delete db.DB.threads[k]; });
+  delete db.DB.notifs[id];
+  Object.entries(db.DB.tokens).forEach(([tok,uid])=>{ if(uid===id) delete db.DB.tokens[tok]; });
+  db.saveNow();
+  res.json({ ok:true, removedFiles:myFiles.length });
 });
 
 /* ============================================================
    STUDENTS  (admin)
    ============================================================ */
+/* عرض موحَّد: طلاب السجل المستورد + الطلاب المضافون يدوياً (مصدر واحد للحقيقة) */
+function rosterAsStudent(s){
+  return { id:s.id, name:s.name, grade:s.level||'', classNo:s.section||'', attendance:s.attendance||0,
+    grades:s.grades||{}, notes:s.notes||'', parent:'', guardian:s.guardian||'', guardianId:s.guardianId||'', source:'roster' };
+}
 app.get('/api/students', auth, requireRole('admin'), (req,res)=>{
-  res.json({ students: db.DB.students, subjects:SUBJECTS, parents: db.DB.users.filter(u=>u.role==='parent').map(publicUser) });
+  const manual = db.DB.students.map(s=> Object.assign({}, s, { grades:s.grades||{}, source:'manual' }));
+  const fromRoster = roster.ready() ? roster.list().map(rosterAsStudent) : [];
+  const seen = new Set(manual.map(s=>s.id));
+  const students = manual.concat(fromRoster.filter(s=>!seen.has(s.id)));
+  const subjects = Array.from(new Set([...(roster.ready() ? (db.DB.roster.subjects||[]) : []), ...SUBJECTS]));
+  res.json({ students, subjects, rosterCount:roster.count(), manualCount:manual.length,
+    parents: db.DB.users.filter(u=>u.role==='parent').map(publicUser) });
 });
 app.post('/api/students', auth, requireRole('admin'), (req,res)=>{
   const b = req.body || {};
@@ -390,15 +456,41 @@ app.post('/api/students', auth, requireRole('admin'), (req,res)=>{
   saveDB(); res.json({ student:s });
 });
 app.put('/api/students/:id', auth, requireRole('admin'), (req,res)=>{
-  const s = db.DB.students.find(x=>x.id===req.params.id);
-  if(!s) return res.status(404).json({ error:'غير موجود' });
   const b = req.body || {};
-  Object.assign(s, {
-    name:b.name??s.name, grade:b.grade??s.grade, classNo:b.classNo??s.classNo,
-    attendance:b.attendance!=null?+b.attendance:s.attendance, parent:b.parent??s.parent,
-    grades:b.grades||s.grades, notes:b.notes??s.notes,
+  const s = db.DB.students.find(x=>x.id===req.params.id);
+  if(s){
+    Object.assign(s, {
+      name:b.name??s.name, grade:b.grade??s.grade, classNo:b.classNo??s.classNo,
+      attendance:b.attendance!=null?+b.attendance:s.attendance, parent:b.parent??s.parent,
+      grades:b.grades||s.grades, notes:b.notes??s.notes,
+    });
+    saveDB(); return res.json({ student:s });
+  }
+  // طالب من السجل المستورد: نعدّله داخل السجل ونعيد بناء الفهرس والإحصاءات
+  const r = roster.updateStudent(req.params.id, {
+    name:b.name, level:b.grade, section:b.classNo, attendance:b.attendance,
+    grades:b.grades, notes:b.notes, guardian:b.guardian, guardianId:b.guardianId,
   });
-  saveDB(); res.json({ student:s });
+  if(!r) return res.status(404).json({ error:'غير موجود' });
+  res.json({ student: rosterAsStudent(r) });
+});
+app.delete('/api/students/:id', auth, requireRole('admin'), (req,res)=>{
+  const id = req.params.id;
+  const wasManual = db.DB.students.some(x=>x.id===id);
+  db.DB.students = db.DB.students.filter(x=>x.id!==id);
+  const wasRoster = roster.removeStudent(id);
+  if(!wasManual && !wasRoster) return res.status(404).json({ error:'غير موجود' });
+  // نظّف إشارات الطالب من حسابات أولياء الأمور والمحادثات المحفوظة
+  db.DB.users.forEach(u=>{
+    if(u.role!=='parent' || !Array.isArray(u.children)) return;
+    u.children = u.children.filter(c=>c!==id);
+  });
+  Object.keys(db.DB.convos).forEach(uid=>{
+    db.DB.convos[uid] = (db.DB.convos[uid]||[]).filter(c=>c.sid!==id);
+  });
+  pruneParents();
+  db.saveNow();
+  res.json({ ok:true, from: wasManual ? 'manual' : 'roster' });
 });
 
 /* ============================================================
@@ -413,7 +505,7 @@ app.get('/api/brain', auth, requireRole('admin'), (req,res)=>{
   res.json({ files: db.DB.files.filter(f=>f.status==='approved') });
 });
 
-app.post('/api/files', auth, requireRole('teacher','admin'), upload.single('file'), async (req,res)=>{
+app.post('/api/files', auth, requireRole('teacher','admin'), requirePerm('files'), upload.single('file'), async (req,res)=>{
   const b = req.body || {};
   const isBrain = b.brain === '1';
   const subject = req.user.role==='teacher' ? req.user.subject : (b.subject || (isBrain?'عقل البوت':SUBJECTS[0]));
@@ -459,6 +551,22 @@ app.put('/api/files/:id', auth, requireRole('admin'), (req,res)=>{
   res.json({ file:f });
 });
 
+/* حذف ملف نهائياً — وإن كان هو مصدر سجل الطلاب فيُمسح السجل معه (منع التناقض) */
+app.delete('/api/files/:id', auth, requireRole('admin'), (req,res)=>{
+  const i = db.DB.files.findIndex(x=>x.id===req.params.id);
+  if(i < 0) return res.status(404).json({ error:'غير موجود' });
+  const f = db.DB.files[i];
+  const src = roster.sourceFile();
+  const isRosterSource = f.subject === 'سجل الطلاب' || (src && f.name === src);
+  db.DB.files.splice(i,1);
+  rmUpload(f.path);
+  let clearedRoster = 0;
+  if(isRosterSource && roster.ready()){ clearedRoster = roster.count(); roster.clear(); }
+  db.saveNow();
+  if(f.owner !== req.user.id) pushNotif(f.owner, 'حذف المدير ملفك', f.name);
+  res.json({ ok:true, clearedRoster });
+});
+
 // عرض الملف داخل المتصفح (inline) بدون تنزيل
 app.get('/api/files/:id/raw', auth, (req,res)=>{
   const f = db.DB.files.find(x=>x.id===req.params.id);
@@ -477,13 +585,16 @@ app.get('/api/files/:id/raw', auth, (req,res)=>{
 /* ============================================================
    MESSAGING + NOTIFICATIONS  (REST history)
    ============================================================ */
-app.get('/api/contacts', auth, requireRole('admin','teacher'), (req,res)=> res.json({ contacts: contactsFor(req.user) }));
+app.get('/api/contacts', auth, requireRole('admin','teacher'), requirePerm('messages'), (req,res)=> res.json({ contacts: contactsFor(req.user) }));
 app.get('/api/threads', auth, (req,res)=>{
   const me = req.user.id; const out = [];
   Object.entries(db.DB.threads).forEach(([k,arr])=>{
     const ids = k.split('|'); if(!ids.includes(me)) return;
     const peer = ids[0]===me ? ids[1] : ids[0];
-    out.push({ peer, last: arr[arr.length-1] || null, unread: arr.filter(m=>m.from===peer && !m.read).length });
+    const pu = db.DB.users.find(u=>u.id===peer);
+    if(!pu) return;   // محادثة مع حساب محذوف — لا نعرضها
+    out.push({ peer, peerName:pu.name, peerRole:pu.role,
+      last: arr[arr.length-1] || null, unread: arr.filter(m=>m.from===peer && !m.read).length });
   });
   res.json({ threads: out });
 });
@@ -506,7 +617,14 @@ app.post('/api/messages/clear', auth, requireRole('admin'), (req,res)=>{
   res.json({ ok:true, cleared:n });
 });
 
-app.post('/api/reset', auth, requireRole('admin'), (req,res)=>{ resetDB(); res.json({ ok:true }); });
+/* إعادة تعيين كاملة: البيانات + السجل المفهرس + ملفات القرص (لا يبقى أثر متناقض) */
+app.post('/api/reset', auth, requireRole('admin'), (req,res)=>{
+  (db.DB.files||[]).forEach(f=> rmUpload(f.path));
+  roster.clear();
+  resetDB();
+  roster.clear();   // بعد البذرة الجديدة أيضاً
+  res.json({ ok:true });
+});
 
 /* SPA fallback */
 app.get('*', (req,res)=>{ res.setHeader('Cache-Control','no-cache'); res.sendFile(path.join(__dirname,'..','public','index.html')); });
@@ -525,13 +643,19 @@ io.on('connection', (socket)=>{
 
   socket.on('chat:message', ({ to, text })=>{
     if(!to || !text || !text.trim()) return;
+    // نعيد قراءة الحساب في كل رسالة: قد يحذفه المدير أو يسحب صلاحية المراسلة
+    const me = db.DB.users.find(u=>u.id===uid);
+    if(!me) return socket.emit('chat:error', 'حسابك لم يعد موجوداً.');
+    if(!hasPerm(me, 'messages')) return socket.emit('chat:error', 'صلاحية المراسلة غير مفعّلة لحسابك.');
+    const peer = db.DB.users.find(u=>u.id===to);
+    if(!peer) return socket.emit('chat:error', 'المستلم غير موجود — ربما حُذف حسابه.');
     const key = tkey(uid, to);
     db.DB.threads[key] = db.DB.threads[key] || [];
     const msg = { from:uid, text:String(text).slice(0,2000), ts:Date.now(), read:false };
     db.DB.threads[key].push(msg); saveDB();
     io.to('u:'+to).emit('chat:message', { ...msg, peer:uid });
     io.to('u:'+uid).emit('chat:message', { ...msg, peer:to, self:true });
-    pushNotif(to, 'رسالة جديدة من '+socket.user.name, String(text).slice(0,40));
+    pushNotif(to, 'رسالة جديدة من '+me.name, String(text).slice(0,40));
   });
 });
 
