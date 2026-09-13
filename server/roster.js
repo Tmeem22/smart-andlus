@@ -33,18 +33,29 @@ const HEAD = {
 };
 const KNOWN = new Set(Object.values(HEAD).flat().map(norm));
 
-async function parseWorkbook(filePath){
+async function parseWorkbook(filePath, mapping){
   const wb = new ExcelJS.Workbook();
   await wb.xlsx.readFile(filePath);
   const ws = wb.worksheets[0];
   if(!ws) throw new Error('لا توجد ورقة عمل في الملف');
 
-  /* خريطة الأعمدة من صف الترويسة */
+  /* خريطة الأعمدة: من الوكيل الذكي إن وُجدت، وإلا مطابقة الترويسة المعروفة */
   const headers = {};
   const subjectCols = [];
+  const useAgent = mapping && typeof mapping === 'object';
+  const subjSet = new Set((useAgent && Array.isArray(mapping.subjects) ? mapping.subjects : []).map(norm));
+  const roleByHeader = {};
+  if(useAgent) ['id','name','level','section','guardian','guardianId','attendance','notes','avg']
+    .forEach(k => { if(mapping[k]) roleByHeader[norm(mapping[k])] = k; });
+
   ws.getRow(1).eachCell((cell, col) => {
     const raw = String(cell.value == null ? '' : cell.value).trim();
     const n = norm(raw);
+    if(useAgent){
+      if(roleByHeader[n]) headers[roleByHeader[n]] = col;
+      else if(subjSet.has(n)) subjectCols.push({ col, name:raw });
+      return;
+    }
     let matched = null;
     for(const [key, names] of Object.entries(HEAD)){ if(names.map(norm).includes(n)){ matched = key; break; } }
     if(matched) headers[matched] = col;
@@ -145,9 +156,9 @@ function mergeStudents(existing, incoming){
   return existing;
 }
 
-async function importFile(filePath, fileName, mode = 'replace'){
+async function importFile(filePath, fileName, mode = 'replace', mapping = null){
   const t0 = Date.now();
-  const { students: incoming, subjects: incSubjects } = await parseWorkbook(filePath);
+  const { students: incoming, subjects: incSubjects } = await parseWorkbook(filePath, mapping);
   if(!incoming.length) throw new Error('الملف لا يحتوي على صفوف');
   let students, subjects;
   const prev = db.DB.roster;

@@ -22,6 +22,8 @@ const { Server } = require('socket.io');
 
 const db = require('./db');
 const roster = require('./roster');
+const extract = require('./extract');
+const agent = require('./agent');
 const llm = require('./llm');
 const { DB, saveDB, resetDB, verifyPw, hashPw, SUBJECTS, PERMS } = db;
 
@@ -285,12 +287,27 @@ app.get('/api/roster/search', auth, (req,res)=>{
   const { q = '', page = '1', per = '25' } = req.query;
   res.json({ ready:true, ...roster.search(String(q).trim(), +page || 1, Math.min(+per || 25, 100)) });
 });
+/* الوكيل الذكي: يحلّل ملفاً ويقترح خريطة الأعمدة (وقد يسأل بخيارات) */
+app.post('/api/roster/analyze', auth, requireRole('admin'), upload.single('file'), async (req,res)=>{
+  if(!req.file) return res.status(400).json({ error:'اختر ملف إكسل (.xlsx)' });
+  const full = path.join(UPLOAD_DIR, req.file.filename);
+  try{
+    const out = await agent.analyzeSheet(full);
+    res.json({ ok:true, ...out, tmp:req.file.filename, fileName:req.file.originalname });
+  }catch(e){
+    try{ fs.unlinkSync(full); }catch(_){}
+    res.status(400).json({ error:'تعذّر تحليل الملف: ' + e.message });
+  }
+});
+
 app.post('/api/roster/import', auth, requireRole('admin'), upload.single('file'), async (req,res)=>{
   if(!req.file) return res.status(400).json({ error:'اختر ملف إكسل (.xlsx)' });
   const full = path.join(UPLOAD_DIR, req.file.filename);
   const mode = (req.body && req.body.mode === 'merge') ? 'merge' : 'replace';
+  let mapping = null;
+  try{ if(req.body && req.body.mapping) mapping = JSON.parse(req.body.mapping); }catch(_){}
   try{
-    const out = await roster.importFile(full, req.file.originalname, mode);
+    const out = await roster.importFile(full, req.file.originalname, mode, mapping);
     db.DB.files.push({ id:'f'+Date.now(), owner:req.user.id, ownerName:req.user.name, subject:'سجل الطلاب',
       name:req.file.originalname, status:'approved', mime:req.file.mimetype, path:'uploads/'+req.file.filename,
       content:`سجل طلاب مفهرس: ${out.count} طالب — تمت القراءة مرة واحدة عند الاستيراد.`, ts:Date.now() });
@@ -372,7 +389,7 @@ app.get('/api/brain', auth, requireRole('admin'), (req,res)=>{
   res.json({ files: db.DB.files.filter(f=>f.status==='approved') });
 });
 
-app.post('/api/files', auth, requireRole('teacher','admin'), upload.single('file'), (req,res)=>{
+app.post('/api/files', auth, requireRole('teacher','admin'), upload.single('file'), async (req,res)=>{
   const b = req.body || {};
   const isBrain = b.brain === '1';
   const subject = req.user.role==='teacher' ? req.user.subject : (b.subject || (isBrain?'عقل البوت':SUBJECTS[0]));
@@ -383,10 +400,9 @@ app.post('/api/files', auth, requireRole('teacher','admin'), upload.single('file
     mime = req.file.mimetype || 'application/octet-stream';
     filePath = 'uploads/' + req.file.filename;
     name = b.name || req.file.originalname;
-    // استخراج نص الملفات النصية لتغذية عقل البوت
-    if(/text\/|json|csv/.test(mime) || /\.(txt|csv|md|json)$/i.test(name)){
-      try { content = fs.readFileSync(path.join(UPLOAD_DIR, req.file.filename),'utf8').slice(0,20000); } catch(e){}
-    }
+    // استخراج النص (نصوص + إكسل) ليقرأه البوت
+    const got = await extract.extractText(path.join(UPLOAD_DIR, req.file.filename), name, mime);
+    if(got) content = got;
   }
   const f = {
     id:'f'+Date.now(), owner:req.user.id, ownerName:req.user.name, subject,

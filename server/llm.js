@@ -11,10 +11,13 @@ const MODEL   = process.env.FIREWORKS_MODEL || 'accounts/fireworks/models/glm-5p
 
 /* مصادر نصية إضافية (ملفات المدير المقبولة) — مقصوصة، ليست 300 صف */
 function brainNotes(){
-  return db.DB.files
-    .filter(f => f.status === 'approved' && f.content)
-    .map(f => `# ${f.name} (${f.subject})\n${f.content.slice(0,800)}`)
-    .join('\n\n').slice(0, 2500);
+  const files = (db.DB.files || []).filter(f => f.status === 'approved');
+  if(!files.length) return '';
+  const withText = files.filter(f => f.content);
+  const noText   = files.filter(f => !f.content);
+  const parts = withText.map(f => `# ${f.name} (${f.subject})\n${String(f.content).slice(0, 4000)}`);
+  if(noText.length) parts.push('# ملفات مرفقة بلا نص مقروء: ' + noText.map(f => f.name).join(' · '));
+  return parts.join('\n\n').slice(0, 14000);
 }
 
 const style = require('./style-saudi');
@@ -87,6 +90,30 @@ const RX_RANK  = /أفضل|افضل|أعلى|اعلى|ترتيب|متفوق|أو
 const RX_CLASS = /فصل|صف|شعبة|شعب/;
 const RX_LONG  = /خطة|تقرير|حلّل|حلل|تحليل|توصيات|علاجي|انضباط|مستوى|قوة|ضعف|كامل|شامل/;
 
+/* «فتح الخانات»: يضخّ محتوى القسم الذي يسأل عنه المستخدم */
+function sectionsContext(q){
+  const t = String(q || ''); const out = [];
+  if(/ملف|ملفات|مرفق|مرفقات|وثيقة|وثائق/i.test(t)){
+    const fl = (db.DB.files || []).slice(-25).map(f =>
+      `• ${f.name} | المادة: ${f.subject} | الرافع: ${f.ownerName} | الحالة: ${f.status}${f.content ? ' | نصّ مقروء ✔' : ' | بلا نص'}`);
+    out.push(`— خانة الملفات (${(db.DB.files||[]).length} ملف):\n${fl.join('\n') || '(فارغة)'}`);
+  }
+  if(/معلم|معلّم|مدرس|أستاذ|استاذ|هيئة/i.test(t)){
+    const ts = (db.DB.users || []).filter(u => u.role === 'teacher')
+      .map(u => `• ${u.name} | المادة: ${u.subject || '—'} | الدخول: ${u.user} | الصلاحيات: ${(u.perms||[]).join('، ') || '—'}`);
+    out.push(`— خانة المعلمين (${ts.length}):\n${ts.join('\n') || '(فارغة)'}`);
+  }
+  if(/حساب|مستخدم|ولي أمر|أولياء/i.test(t)){
+    const counts = (db.DB.users || []).reduce((a,u)=>{ a[u.role]=(a[u.role]||0)+1; return a; },{});
+    out.push(`— خانة الحسابات: ${JSON.stringify(counts)}`);
+  }
+  if(/رسائل|محادث|مراسلة/i.test(t)){
+    const n = Object.keys(db.DB.threads || {}).length;
+    out.push(`— خانة المراسلة: ${n} محادثة داخلية بين الإدارة والمعلمين.`);
+  }
+  return out.join('\n\n').slice(0, 8000);
+}
+
 function compactStats(st, q){
   if(!st) return null;
   const o = {
@@ -114,8 +141,10 @@ function promptForSchool(question){
   } else if(st){
     parts.push(`\nملاحظة: لم يُطابق السؤال طالباً محدّداً — أجب من الملخّص الإحصائي أعلاه. إن كان السؤال عن طالب باسم غير موجود في السجل فصرّح بأنه غير مسجّل.`);
   }
+  const sec = sectionsContext(question);
+  if(sec) parts.push(`\n== محتوى الخانات المطلوبة (لديك صلاحية الاطلاع) ==\n${sec}`);
   const notes = brainNotes();
-  if(notes) parts.push(`\n== مصادر معرفية إضافية ==\n${notes}`);
+  if(notes) parts.push(`\n== مصادر معرفية إضافية (ملفات معتمدة) ==\n${notes}`);
   return parts.join('\n');
 }
 

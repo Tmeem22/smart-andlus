@@ -217,7 +217,7 @@ async function enterApp(){
 }
 const NAV = {
   parent:[{ id:'chat', t:'المساعد الذكي', ic:I.chat }, { id:'children', t:'أبنائي', ic:I.student }],
-  teacher:[{ id:'tfiles', t:'ملفات مادتي', ic:I.files }, { id:'messages', t:'المراسلة', ic:I.msg }],
+  teacher:[{ id:'chat', t:'المساعد الذكي', ic:I.chat }, { id:'tfiles', t:'ملفات مادتي', ic:I.files }, { id:'messages', t:'المراسلة', ic:I.msg }],
   admin:[{ id:'dash', t:'الرئيسية', ic:I.home }, { id:'chat', t:'المساعد الذكي', ic:I.chat }, { id:'roster', t:'سجل الطلاب', ic:I.student }, { id:'teachers', t:'المعلمون', ic:I.teacher }, { id:'students', t:'الطلاب', ic:I.student }, { id:'afiles', t:'مركز الملفات', ic:I.files }, { id:'brain', t:'عقل البوت', ic:I.bot }, { id:'messages', t:'المراسلة', ic:I.msg }],
 };
 let CUR = '';
@@ -426,8 +426,9 @@ async function renderRoster(v){
         </div>
         <div class="flex gap wrap center">
           <input type="file" id="rosterFile" accept=".xlsx" style="max-width:220px;padding:9px;border:1.5px solid var(--line);border-radius:12px">
+          <button class="btn" id="rosterSmart" title="الوكيل يقرأ الملف ويفصل الهويات والأسماء والمواد تلقائياً">🤖 تحليل ذكي</button>
           <button class="btn gold" id="rosterReplace" title="يمسح السجل الحالي ويضع الملف الجديد بدله">⬆️ استبدال الكل</button>
-          <button class="btn" id="rosterMerge" title="يدمج الملف مع السجل الحالي (يضيف طلاب/درجات بمطابقة رقم الطالب)">＋ إضافة/دمج</button>
+          <button class="btn ghost" id="rosterMerge" title="يدمج الملف مع السجل الحالي (يضيف طلاب/درجات بمطابقة رقم الطالب)">＋ إضافة/دمج</button>
         </div>
       </div>
       <p class="small muted" style="margin:10px 2px 0">💡 <b>استبدال الكل</b>: ملف كامل جديد. · <b>إضافة/دمج</b>: للهويات أولاً ثم ملفات المواد — تُدمج الدرجات بمطابقة «رقم الطالب».</p>
@@ -446,6 +447,7 @@ async function renderRoster(v){
       </div>
       <div id="rosterTable"><div class="empty-state small">جارٍ التحميل...</div></div>
     </div>`;
+  el('rosterSmart').onclick = smartImport;
   el('rosterReplace').onclick = () => doImport('replace');
   el('rosterMerge').onclick = () => doImport('merge');
   animateCounts();
@@ -454,13 +456,55 @@ async function renderRoster(v){
   if(info.ready) loadRosterTable();
   else el('rosterTable').innerHTML = `<div class="empty-state small">استورد ملف الإكسل أولاً</div>`;
 }
-async function doImport(mode){
+/* الوكيل الذكي: يحلّل الملف ويفصل الأعمدة، ويسأل بخيارات عند الحاجة */
+async function smartImport(){
+  const f = el('rosterFile').files[0];
+  if(!f){ toast('اختر ملف .xlsx أولاً'); return; }
+  const b = el('rosterSmart'); b.disabled = true; b.textContent = '🤖 يحلّل...';
+  try{
+    const fd = new FormData(); fd.append('file', f);
+    const a = await api('/api/roster/analyze', { method:'POST', form:fd });
+    showAgentResult(a, f);
+  }catch(e){ toast(e.message); }
+  b.disabled = false; b.textContent = '🤖 تحليل ذكي';
+}
+function showAgentResult(a, file){
+  const m = a.mapping || {};
+  const kind = { identities:'ملف هويات (تسجيل دخول)', grades:'ملف درجات مواد', mixed:'ملف شامل (هويات + درجات)' }[a.kind] || 'غير محدد';
+  const rows = [['رقم الطالب',m.id],['اسم الطالب',m.name],['الصف',m.level],['الفصل',m.section],
+    ['وليّ الأمر',m.guardian],['هوية وليّ الأمر',m.guardianId],['الحضور',m.attendance],['ملاحظات',m.notes]]
+    .filter(([,v])=>v).map(([k,v])=>`<div class="r-row"><span class="r-sub">${k}</span><span class="small">${esc(v)}</span></div>`).join('');
+  const subs = (m.subjects||[]).map(s=>`<span class="tag approved" style="margin:2px">${esc(s)}</span>`).join('') || '<span class="small muted">لا مواد</span>';
+  let body = `<p class="small">حلّلتُ <b>${esc(a.fileName || file.name)}</b> — ${a.totalRows} صف.</p>
+    <span class="chip">${kind}</span>
+    <div class="rep-sec">الأعمدة المتعرّف عليها</div>${rows || '<span class="small muted">لم أتعرّف على أعمدة الهوية</span>'}
+    <div class="rep-sec">المواد المكتشفة</div>${subs}`;
+  if(a.question){
+    body += `<div class="rep-sec">يحتاج توضيحاً منك</div><p class="small">${esc(a.question.text)}</p>
+      <div class="flex gap wrap" id="agentQ">${(a.question.options||[]).map((o,i)=>`<button class="btn ghost sm" data-i="${i}">${esc(o)}</button>`).join('')}</div>
+      <div class="small muted mt" id="agentPick">— لم تختر بعد</div>`;
+  }
+  modal('🤖 نتيجة الوكيل', body, [
+    { t:'＋ إضافة/دمج', cls:'btn', fn:()=>{ closeModal(); doImport('merge', m); } },
+    { t:'⬆️ استبدال الكل', cls:'btn gold', fn:()=>{ closeModal(); doImport('replace', m); } },
+    { t:'إلغاء', cls:'btn ghost', fn:closeModal },
+  ]);
+  const qb = el('agentQ');
+  if(qb) qb.querySelectorAll('button').forEach(btn => btn.onclick = () => {
+    qb.querySelectorAll('button').forEach(x => x.classList.add('ghost'));
+    btn.classList.remove('ghost');
+    el('agentPick').textContent = 'اخترت: ' + btn.textContent;
+  });
+}
+
+async function doImport(mode, mapping){
   const f = el('rosterFile').files[0];
   if(!f){ toast('اختر ملف .xlsx أولاً'); return; }
   if(mode==='replace' && !confirm('استبدال كل السجل الحالي بهذا الملف؟')) return;
   const rb = el('rosterReplace'), mb = el('rosterMerge');
   rb.disabled = mb.disabled = true; (mode==='merge'?mb:rb).textContent = '⏳ جارٍ...';
   const fd = new FormData(); fd.append('file', f); fd.append('mode', mode);
+  if(mapping) fd.append('mapping', JSON.stringify(mapping));
   try{
     const r = await api('/api/roster/import', { method:'POST', form:fd });
     toast(`${mode==='merge'?'تم الدمج':'تم الاستبدال'} — ${r.count} طالب في ${r.ms}ms ✅`);
