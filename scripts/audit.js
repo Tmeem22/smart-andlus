@@ -95,7 +95,7 @@ async function waitUp(ms = 20000){
   try{ fs.unlinkSync(tmpData); }catch(_){}
 
   const srv = spawn(process.execPath, [path.join(__dirname, '..', 'server', 'index.js')], {
-    env: { ...process.env, PORT: String(PORT), MONGODB_URI: '' },
+    env: { ...process.env, PORT: String(PORT), MONGODB_URI: '', AI_IMPORT: 'off' },
     stdio: ['ignore', 'pipe', 'pipe'],
   });
   let srvLog = '';
@@ -385,30 +385,76 @@ async function waitUp(ms = 20000){
     check('بلا توكن ممنوع من تغيير كلمات المرور',
       (await req('POST', '/api/account/password', { body:{ current:'x', next:'Hacked12345' } })).status === 401);
 
-    /* ---------- 17. كشف نيّة الأدوات البصرية (بلا نداء AI) ---------- */
-    const { intentFlags } = require('../server/intent');
-    const intentCases = [
-      ['«أفضل مادة عند الطالب» لا يرسم ترتيب الطلاب', 'وش افضل ماده واضعف ماده في ذا الطالب', { top:false, chart:false }],
-      ['«أضعف مادة عند ابني» لا يرسم شيئاً',          'وش أفضل مادة وأضعف مادة عند ابني',      { top:false, chart:false }],
-      ['«رسم لأفضل الطلاب» يرسم الترتيب',             'سوي لي رسم بياني لافضل الطلاب',         { top:true,  chart:true }],
-      ['«أفضل 10 طلاب» يرسم الترتيب',                 'أفضل 10 طلاب',                          { top:true }],
-      ['«ترتيب الطلاب في الفصل» يرسم الترتيب',        'ترتيب الطلاب في الفصل',                 { top:true }],
-      ['«أعلى درجة في مادة» لا يرسم الترتيب',         'أعلى درجة في مادة الرياضيات',           { top:false }],
-      ['«ما قلت لك تسوي رسم» يلغي المرفق',            'انا ما قلت لك تسوي رسم',                { chart:false, top:false, negated:true }],
-      ['«لا تسوي رسم بياني» يلغي المرفق',             'لا تسوي رسم بياني',                     { chart:false, negated:true }],
-      ['«بدون رسم» يلغي المرفق',                      'بدون رسم من فضلك',                      { chart:false, negated:true }],
-      ['«شيل الرسمة» يلغي المرفق',                    'شيل الرسمة',                            { chart:false, negated:true }],
-      ['طلب الرسم الصريح يبقى يعمل',                  'ابي رسم بياني لدرجات ابني',             { chart:true, top:false }],
-      ['سؤال الحضور يعطي دائرة المواظبة',             'كم نسبة الحضور',                        { donut:true }],
-      ['طلب التقرير يعطي التقرير',                    'ابي تقرير كامل',                        { report:true }],
-    ];
-    intentCases.forEach(([label, msg, exp]) => {
-      const f = intentFlags(msg);
-      const okAll = Object.entries(exp).every(([k,v]) => f[k] === v);
-      check(label, okAll, JSON.stringify(f));
-    });
+    /* ---------- 17. بروتوكول قرار المرفقات (الذكاء يقرّر — نحن نقرأ قراره فقط) ---------- */
+    const llmx = require('../server/llm');
+    const pd = llmx.parseDirective('<<مرفقات: chart,donut | طالب: ST1005>>\nنص الرد');
+    check('قراءة قرار «رسم + حضور» مع رقم الطالب', pd.chart && pd.donut && !pd.report && !pd.top && pd.student === 'ST1005', JSON.stringify(pd));
+    const pn = llmx.parseDirective('<<مرفقات: لا>>\nنص');
+    check('قرار «لا» = بلا مرفقات', pn.found && !pn.chart && !pn.donut && !pn.report && !pn.top && !pn.student, JSON.stringify(pn));
+    const pnone = llmx.parseDirective('ردّ نسي سطر القرار ويذكر كلمة رسم بياني وأفضل الطلاب');
+    check('كلام الرد لا يُفسَّر كطلب (لا كلمات مفتاحية)', !pnone.found && !pnone.chart && !pnone.top, JSON.stringify(pnone));
+    check('سطر القرار لا يظهر للمستخدم', llmx.stripTools('<<مرفقات: chart | طالب: ST1>>\nأهلاً') === 'أهلاً');
+    check('صياغة قرار سابق للذاكرة', llmx.directiveFor({ chart:true, top:false }, 'ST9') === '<<مرفقات: chart | طالب: ST9>>');
 
-    /* ---------- 18. إعادة التعيين تمسح كل شيء ---------- */
+    /* البثّ: القرار يُحجب حتى لو وصل مقطّعاً على دفعات */
+    const streamed = chunks => { let out = ''; const f = llmx.makeHeadFilter(d => { out += d; }); chunks.forEach(c => f.push(c)); f.end(); return out; };
+    check('البثّ يحجب القرار المقطّع', streamed(['<', '<مرف', 'قات: ch', 'art>>', '\nمرحبا ', 'بك']) === 'مرحبا بك',
+      JSON.stringify(streamed(['<', '<مرف', 'قات: ch', 'art>>', '\nمرحبا ', 'بك'])));
+    check('البثّ يمرّر الرد كاملاً إن بدأ بلا قرار', streamed(['أهلاً ', 'وسهلاً']) === 'أهلاً وسهلاً');
+    check('البثّ لا يبتلع نصاً يبدأ بـ «<» عادية', streamed(['<b>', 'مهم</b>']) === '<b>مهم</b>');
+
+    /* الذاكرة تعرف ما عُرض سابقاً — ليفهم الذكاء «ما قلت لك تسويه» */
+    const hc = llmx.historyFromConvo({ msgs:[
+      { role:'user', text:'ابي رسم لدرجاته' },
+      { role:'bot', text:'تفضل الرسم', chart:true, student:{ id:'ST1' } },
+    ]});
+    check('ذاكرة المحادثة تحمل قرار المرفق السابق',
+      hc.length === 2 && hc[1].role === 'assistant' && hc[1].content.startsWith('<<مرفقات: chart>>'), JSON.stringify(hc));
+
+    /* ---------- 18. خصوصية: ملفات المدرسة لا تصل وليّ الأمر إلا بإذن صريح ---------- */
+    const filesX = [
+      { name:'كشف درجات الفصل', subject:'الرياضيات', status:'approved', content:'درجات كل الطلاب', forParents:false },
+      { name:'التقويم الدراسي', subject:'عقل البوت', status:'approved', content:'بداية الاختبارات', forParents:true },
+      { name:'مسودة', subject:'العلوم', status:'pending', content:'غير معتمد', forParents:true },
+    ];
+    const forParent = llmx.readableFiles('parent', filesX).map(f => f.name);
+    const forSchool = llmx.readableFiles('school', filesX).map(f => f.name);
+    check('وليّ الأمر لا يقرأ ملف درجات عام', !forParent.includes('كشف درجات الفصل'), JSON.stringify(forParent));
+    check('وليّ الأمر يقرأ ما أُتيح له فقط', forParent.length === 1 && forParent[0] === 'التقويم الدراسي', JSON.stringify(forParent));
+    check('ملف غير معتمد لا يصل لأحد', !forSchool.includes('مسودة') && !forParent.includes('مسودة'));
+    check('الإدارة تقرأ كل المعتمد', forSchool.length === 2, JSON.stringify(forSchool));
+
+    /* ---------- 19. إكسل من معلّم لا يسجّل هويات قبل قبول المدير ---------- */
+    await req('POST', '/api/roster/clear', { token:A3 });
+    await req('POST', '/api/teachers', { token:A3, body:{ name:'معلم هويات', user:'tid', pass:'audit-pass-2026', perms:['files'] } });
+    const TID = (await req('POST', '/api/login', { body:{ role:'teacher', user:'tid', pass:'audit-pass-2026' } })).json.token;
+    const tf = new FormData();
+    tf.append('file', new Blob([fs.readFileSync(IDS_ONLY)]), 'هويات-من-معلم.xlsx');
+    const tUp = await req('POST', '/api/files', { token:TID, form:tf });
+    check('المعلّم يرفع إكسل هويات', tUp.status === 200, 'status ' + tUp.status);
+    const stBefore = (await req('GET', '/api/roster/stats', { token:A3 })).json;
+    check('هويات ملف المعلّم لا تُسجَّل قبل المراجعة', stBefore.ready === false && stBefore.count === 0, JSON.stringify(stBefore.count));
+    const gidT = '1060000001';
+    check('لا دخول بهوية من ملف معلّم غير مقبول',
+      (await req('POST', '/api/login', { body:{ role:'parent', idType:'guardian', identifier:gidT } })).status === 401);
+    const appr = await req('PUT', '/api/files/' + tUp.json.file.id, { token:A3, body:{ status:'approved' } });
+    check('المدير يقبل الملف', appr.status === 200, 'status ' + appr.status);
+    const stAfter = (await req('GET', '/api/roster/stats', { token:A3 })).json;
+    check('بعد القبول تُسجَّل الهويات', stAfter.ready === true && stAfter.count === 5, JSON.stringify(stAfter.count));
+    check('بعد القبول يدخل وليّ الأمر',
+      (await req('POST', '/api/login', { body:{ role:'parent', idType:'guardian', identifier:gidT } })).status === 200);
+
+    /* ---------- 20. إتاحة ملف لأولياء الأمور بيد المدير فقط ---------- */
+    const pubF = new FormData(); pubF.append('brain', '1'); pubF.append('name', 'تعميم'); pubF.append('content', 'نص عام');
+    const pubUp = (await req('POST', '/api/files', { token:A3, form:pubF })).json.file;
+    check('ملف المدير مخفي عن أولياء الأمور افتراضياً', pubUp.forParents === false, String(pubUp.forParents));
+    const tog = await req('PUT', '/api/files/' + pubUp.id, { token:A3, body:{ forParents:true } });
+    check('المدير يتيح الملف لأولياء الأمور', tog.status === 200 && tog.json.file.forParents === true, JSON.stringify(tog.json && tog.json.file && tog.json.file.forParents));
+    const tForce = new FormData(); tForce.append('name', 'محاولة'); tForce.append('content', 'x'); tForce.append('forParents', '1');
+    const tForced = (await req('POST', '/api/files', { token:TID, form:tForce })).json.file;
+    check('المعلّم لا يستطيع إتاحة ملف لأولياء الأمور', tForced && tForced.forParents === false, JSON.stringify(tForced && tForced.forParents));
+
+    /* ---------- 21. إعادة التعيين تمسح كل شيء ---------- */
     await req('POST', '/api/roster/import', { token:A, form:(()=>{ const f=new FormData();
       f.append('file', new Blob([fs.readFileSync(ROSTER)]), 'سجل-اختبار.xlsx'); f.append('mode','replace'); return f; })() });
     await req('POST', '/api/reset', { token:A });

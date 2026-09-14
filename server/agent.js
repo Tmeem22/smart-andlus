@@ -53,10 +53,14 @@ const SYS = `أنت «وكيل ملفات» في منصة مدرسية. مهمت
 5. كل عمود في الترويسة يجب أن يظهر مرة واحدة في "columns".`;
 
 /* يحلّل الملف ويُرجع خريطة الأعمدة (وربما سؤال بخيارات) */
-async function analyzeSheet(filePath){
+async function analyzeSheet(filePath, clarify = null){
   const s = await sampleSheet(filePath);
   const preview = s.headers.map((h, i) => `${h || '(بلا عنوان)'} => ${s.rows.map(r => r[i]).filter(v => v !== '').slice(0,3).join(' , ') || '—'}`).join('\n');
-  const user = `اسم الورقة: ${s.sheet}\nعدد الصفوف: ${s.totalRows}\n\nالأعمدة وعيّنات قيمها:\n${preview}`;
+  let user = `اسم الورقة: ${s.sheet}\nعدد الصفوف: ${s.totalRows}\n\nالأعمدة وعيّنات قيمها:\n${preview}`;
+  // جواب المستخدم عن سؤال سابق — يفهمه الوكيل ويبني الخريطة عليه
+  if(clarify && clarify.answer){
+    user += `\n\nتوضيح من المستخدم عن سؤالك السابق:\nالسؤال: ${String(clarify.question || '').slice(0, 300)}\nالجواب: ${String(clarify.answer).slice(0, 300)}\nابنِ الخريطة على هذا الجواب، ولا تكرّر السؤال نفسه.`;
+  }
   let parsed = null;
   try{
     const raw = await llm.askLLM([{ role:'system', content:SYS }, { role:'user', content:user }]);

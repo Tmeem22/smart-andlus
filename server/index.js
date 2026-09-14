@@ -182,57 +182,93 @@ app.get('/api/children', auth, requireRole('parent'), (req,res)=>{
   res.json({ children: kids });
 });
 
-const chatHist = {}; // "userId:scope" -> transcript
-/* الذاكرة محدودة: نحتفظ بآخر MEM_TURNS دورة فقط لكل محادثة */
-function trimHist(h){ const max = llm.MEM_MSGS + 2; if(h.length > max) h.splice(0, h.length - max); return h; }
-
 /* تحويل سجل الفهرس إلى الشكل الذي ترسمه الواجهة */
 function clientStudent(s){
   if(!s) return null;
   return { id:s.id, name:s.name, grade:s.level || s.grade || '', classNo:s.section || s.classNo || '',
     attendance:s.attendance || 0, grades:s.grades || {}, notes:s.notes || '' };
 }
-/* يحدّد سياق السؤال: وليّ أمر = ابنه · إدارة = السجل المفهرس */
-function resolveChat(user, body){
+
+/* ذاكرة شات الإدارة والمعلّم: لكل فتحة صفحة ذاكرتها.
+   (وليّ الأمر ذاكرته هي محادثته المحفوظة نفسها — تبقى بعد إعادة التشغيل) */
+const SCHOOL_SESS = new Map();
+function schoolSession(user, sessionId){
+  const key = user.id + ':' + String(sessionId || 'default').slice(0, 48);
+  let s = SCHOOL_SESS.get(key);
+  if(!s){ s = { hist:[], lastSid:null, ts:0 }; SCHOOL_SESS.set(key, s); }
+  s.ts = Date.now();
+  if(SCHOOL_SESS.size > 500){
+    [...SCHOOL_SESS.entries()].sort((a,b)=> a[1].ts - b[1].ts).slice(0, SCHOOL_SESS.size - 400)
+      .forEach(([k])=> SCHOOL_SESS.delete(k));
+  }
+  return s;
+}
+
+/* طلاب مُضافون يدوياً يطابقون رقماً أو اسماً كاملاً في الرسالة */
+function manualMatches(message){
+  const q = roster.norm(message);
+  return db.DB.students.filter(s => (s.id && q.includes(roster.norm(s.id))) || (s.name && q.includes(roster.norm(s.name))));
+}
+
+/* يجهّز سياق السؤال: البيانات والصلاحيات فقط — الفهم كله للنموذج */
+async function resolveChat(user, body){
   const message = String((body && body.message) || '').trim();
   if(user.role === 'parent'){
     const sid = body.studentId;
     const s = findStudentAny(sid);
     if(!s || !(user.children||[]).includes(sid)) return { error:'الطالب غير موجود' };
     const avg = avgOf(s);
-    return { message, role:user.role, key:user.id+':'+sid, system:llm.promptForParent(clientStudent(s), avg, message), student:clientStudent(s), avg };
+    const convo = body.convoId && (db.DB.convos[user.id] || []).find(c => c.id === body.convoId);
+    return { message, role:user.role, student:clientStudent(s), avg,
+      history: llm.historyFromConvo(convo && convo.sid === sid ? convo : null),
+      system: await llm.promptForParent(clientStudent(s), avg, message) };
   }
-  // مدير / معلم: بحث فوري في الفهرس
-  const hit = roster.ready() ? roster.findStudents(message, 1)[0] : null;
-  return { message, role:user.role, key:user.id+':school', system:llm.promptForSchool(message),
-    student:clientStudent(hit), avg: hit ? hit.avg : null };
+  // الإدارة والمعلّم: البحث في السجل يجلب مرشّحين، والنموذج يقرّر من المقصود
+  const sess = schoolSession(user, body.sessionId);
+  const candidates = [...(roster.ready() ? roster.findStudents(message, 4) : []), ...manualMatches(message)];
+  const last = sess.lastSid && findStudentAny(sess.lastSid);
+  if(last && !candidates.some(c => c.id === last.id)) candidates.push(last);
+  return { message, role:user.role, sess, student:null, avg:null,
+    history: sess.hist,
+    system: await llm.promptForSchool(message, user, candidates.slice(0, 6)) };
 }
 
-/* كشف نيّة الطلب — في server/intent.js ليُختبر وحده */
-const { intentFlags } = require('./intent');
-
-/* يمنع تفعيل أداة بصرية بلا بيانات تسندها + يجبرها عند طلب السائل صراحةً */
+/* يطبّق قرار النموذج — بعد التحقّق من الصلاحية ومن وجود البيانات */
 function buildDone(full, ctx){
-  const f = llm.toolFlags(full);
-  const w = intentFlags(ctx.message);
-  const hasGrades = !!(ctx.student && ctx.student.grades && Object.keys(ctx.student.grades).length);
+  const d = llm.parseDirective(full);
+  let student = ctx.student, avg = ctx.avg;
+  if(ctx.role !== 'parent'){
+    const pick = d.student ? findStudentAny(d.student) : null;
+    student = pick ? clientStudent(pick) : null;
+    avg = pick ? avgOf(pick) : null;
+    if(pick && ctx.sess) ctx.sess.lastSid = pick.id;
+  }
+  const hasGrades = !!(student && student.grades && Object.keys(student.grades).length);
   const st = roster.stats();
-  // نفى السائل الأداة صراحةً؟ لا نرسم شيئاً — ولو أصدر النموذج الرمز
-  const want = w.negated
-    ? { chart:false, donut:false, report:false, top:false }
-    : { chart:f.chart || w.chart, donut:f.donut || w.donut, report:f.report || w.report, top:f.top || w.top };
-  // ترتيب طلاب المدرسة بيانات طلاب آخرين — لا يُعرض لوليّ أمر أبداً
+  // ترتيب طلاب المدرسة فيه أسماء أطفال آخرين — لا يصل وليّ أمر مهما قرّر النموذج
   const mayRank = ctx.role === 'admin' || ctx.role === 'teacher';
   const out = {
     text: llm.stripTools(full),
-    chart: want.chart && hasGrades,
-    donut: want.donut && !!(ctx.student && ctx.student.attendance),
-    report: want.report && hasGrades,
-    top: want.top && mayRank && !!(st && st.أعلى_10 && st.أعلى_10.length),
-    student: ctx.student, avg: ctx.avg,
+    chart:  d.chart  && hasGrades,
+    donut:  d.donut  && !!(student && student.attendance),
+    report: d.report && hasGrades,
+    top:    d.top    && mayRank && !!(st && st.أعلى_10 && st.أعلى_10.length),
+    student, avg,
   };
   if(out.top) out.topData = st.أعلى_10;
-  if(out.chart || out.report) out.subjects = Object.keys(ctx.student.grades);
+  return out;
+}
+
+/* بعد اكتمال الرد: طبّق القرار، حدّث الذاكرة، واحفظ المحادثة */
+function finishTurn(req, ctx, full){
+  const out = buildDone(full, ctx);
+  if(ctx.sess){
+    ctx.sess.hist.push({ role:'user', content:ctx.message },
+      { role:'assistant', content: llm.directiveFor(out, out.student && out.student.id) + '\n' + out.text });
+    if(ctx.sess.hist.length > llm.MEM_MSGS) ctx.sess.hist.splice(0, ctx.sess.hist.length - llm.MEM_MSGS);
+  }
+  const cv = saveConvoTurn(req.user, req.body.convoId, req.body.studentId, ctx.message, out);
+  out.convoId = cv.convoId; out.convoTitle = cv.title;
   return out;
 }
 
@@ -276,58 +312,47 @@ app.delete('/api/convos/:id', auth, requireRole('parent'), (req,res)=>{
   saveDB(); res.json({ ok:true });
 });
 
+/* طلب غير متدفّق — احتياط للمتصفحات التي لا تدعم البثّ */
 app.post('/api/chat', auth, async (req,res)=>{
-  const ctx = resolveChat(req.user, req.body);
+  let ctx;
+  try{ ctx = await resolveChat(req.user, req.body || {}); }
+  catch(e){ return res.status(500).json({ error:'تعذّر تجهيز السياق: ' + String(e.message||e) }); }
   if(ctx.error) return res.status(404).json({ error:ctx.error });
   if(!ctx.message) return res.status(400).json({ error:'رسالة فارغة' });
-  const hist = chatHist[ctx.key] = chatHist[ctx.key] || [];
-  hist.push({ role:'user', content:ctx.message });
-  try {
-    const out = await llm.chat(ctx.system, hist);
-    hist.push({ role:'assistant', content: out.text }); trimHist(hist);
-    const w = intentFlags(ctx.message);
-    const hasGrades = !!(ctx.student && ctx.student.grades && Object.keys(ctx.student.grades).length);
-    out.chart  = (out.chart  || w.chart)  && hasGrades;
-    out.donut  = (out.donut  || w.donut)  && !!(ctx.student && ctx.student.attendance);
-    out.report = (out.report || w.report) && hasGrades;
-    const cv = saveConvoTurn(req.user, req.body.convoId, req.body.studentId, ctx.message,
-      { ...out, student:ctx.student, avg:ctx.avg });
-    res.json({ ...out, student:ctx.student, avg:ctx.avg, convoId:cv.convoId, convoTitle:cv.title, source:'ai' });
-  } catch(e){
-    hist.pop();
-    res.json({ text:'', fallback:true, error:String(e.message||e), student:ctx.student, avg:ctx.avg, source:'local' });
+  try{
+    const full = await llm.askLLM(llm.buildMessages(ctx.system, ctx.history, ctx.message));
+    res.json({ ...finishTurn(req, ctx, full), source:'ai' });
+  }catch(e){
+    res.status(502).json({ error:'تعذّر الوصول إلى المساعد الذكي — ' + String(e.message||e) });
   }
 });
 
 /* بثّ حي (SSE فوق POST) — الواجهة تقرأ الأحرف أولاً بأول */
 app.post('/api/chat/stream', auth, async (req,res)=>{
-  const ctx = resolveChat(req.user, req.body);
   res.setHeader('Content-Type','text/event-stream; charset=utf-8');
   res.setHeader('Cache-Control','no-cache, no-transform');
   res.setHeader('Connection','keep-alive');
   res.setHeader('X-Accel-Buffering','no');
   if(res.flushHeaders) res.flushHeaders();
   const send = (ev, data) => res.write(`event: ${ev}\ndata: ${JSON.stringify(data)}\n\n`);
+  let ctx;
+  try{ ctx = await resolveChat(req.user, req.body || {}); }
+  catch(e){ send('error', { error:'تعذّر تجهيز السياق: ' + String(e.message||e) }); return res.end(); }
   if(ctx.error || !ctx.message){ send('error', { error: ctx.error || 'رسالة فارغة' }); return res.end(); }
 
-  const hist = chatHist[ctx.key] = chatHist[ctx.key] || [];
-  hist.push({ role:'user', content:ctx.message });
-  const messages = llm.buildMessages(ctx.system, hist);
   let closed = false;
-  res.on('close', ()=> { closed = true; });   // انقطاع العميل (req يُغلق فور اكتمال الجسم)
+  res.on('close', ()=> { closed = true; });   // انقطاع العميل
+  // سطر قرار المرفقات يُحجب عن المستخدم، والباقي يُبثّ حرفاً بحرف
+  const filter = llm.makeHeadFilter(d => { if(!closed) send('token', { d }); });
   try{
     let thinkN = 0;
-    const full = await llm.streamLLM(messages,
-      d => { if(!closed) send('token', { d }); },
+    const full = await llm.streamLLM(llm.buildMessages(ctx.system, ctx.history, ctx.message),
+      d => filter.push(d),
       () => { if(!closed && (++thinkN % 8 === 0)) send('think', { n:thinkN }); });
-    hist.push({ role:'assistant', content: llm.stripTools(full) }); trimHist(hist);
-    const out = buildDone(full, ctx);
-    const cv = saveConvoTurn(req.user, req.body.convoId, req.body.studentId, ctx.message, out);
-    out.convoId = cv.convoId; out.convoTitle = cv.title;
-    send('done', out);
+    filter.end();
+    send('done', finishTurn(req, ctx, full));
   }catch(e){
-    hist.pop();
-    send('error', { error:String(e.message||e), student:ctx.student, avg:ctx.avg });
+    send('error', { error:String(e.message||e) });
   }
   res.end();
 });
@@ -389,16 +414,48 @@ app.post('/api/roster/clear', auth, requireRole('admin'), (req,res)=>{
   res.json({ ok:true, cleared:had });
 });
 
-/* الوكيل الذكي: يحلّل ملفاً ويقترح خريطة الأعمدة (وقد يسأل بخيارات) */
+/* ---------- فهم أعمدة الإكسل ----------
+   الوكيل الذكي يقرأ الترويسة وعيّنة القيم ويفهمها أياً كانت صياغتها
+   («اسم الطالبة»، «السجل المدني»، «Student No»...).
+   مطابقة الأسماء المعروفة في roster.js احتياط فقط إن تعذّر الوصول للذكاء. */
+const aiImportOn = () => process.env.AI_IMPORT !== 'off';
+
+async function smartMapping(filePath){
+  if(!aiImportOn()) return { mapping:null, question:null, ai:false };
+  try{
+    const a = await agent.analyzeSheet(filePath);
+    const m = a && a.ok ? a.mapping : null;
+    return { mapping: m && (m.id || m.name) ? m : null, question: a && a.question, ai: !!(a && a.ok) };
+  }catch(_){ return { mapping:null, question:null, ai:false }; }
+}
+
+/* تسجيل هويات من ملف إكسل رُفع لأي خانة (للمدير، أو لملف معلّم بعد قبوله) */
+async function autoIdentities(filePath, fileName){
+  try{
+    const sm = await smartMapping(filePath);
+    // الملف غامض ويحتاج جواباً — لا نخمّن في مسار تلقائي؛ ننبّه المدير
+    if(sm.question) return { needsReview:true, question:sm.question.text };
+    return await roster.tryAutoIdentities(filePath, fileName, sm.mapping);
+  }catch(e){
+    console.error('تعذّر تسجيل الهويات تلقائياً:', e.message);
+    return null;
+  }
+}
+
+/* الوكيل الذكي: يحلّل ملفاً ويقترح خريطة الأعمدة، وقد يسأل بخيارات.
+   جواب المستخدم يُعاد للوكيل ليفهمه ويعدّل الخريطة — لا يُتجاهل. */
 app.post('/api/roster/analyze', auth, requireRole('admin'), upload.single('file'), async (req,res)=>{
   if(!req.file) return res.status(400).json({ error:'اختر ملف إكسل (.xlsx)' });
   const full = path.join(UPLOAD_DIR, req.file.filename);
+  let clarify = null;
+  try{ if(req.body && req.body.clarify) clarify = JSON.parse(req.body.clarify); }catch(_){}
   try{
-    const out = await agent.analyzeSheet(full);
-    res.json({ ok:true, ...out, tmp:req.file.filename, fileName:fixName(req.file.originalname) });
+    const out = await agent.analyzeSheet(full, clarify);
+    res.json({ ...out, fileName:fixName(req.file.originalname) });
   }catch(e){
-    try{ fs.unlinkSync(full); }catch(_){}
     res.status(400).json({ error:'تعذّر تحليل الملف: ' + e.message });
+  }finally{
+    try{ fs.unlinkSync(full); }catch(_){}   // التحليل لا يحتفظ بنسخة — الاستيراد يرفع الملف من جديد
   }
 });
 
@@ -408,8 +465,17 @@ app.post('/api/roster/import', auth, requireRole('admin'), upload.single('file')
   const mode = (req.body && req.body.mode === 'merge') ? 'merge' : 'replace';
   let mapping = null;
   try{ if(req.body && req.body.mapping) mapping = JSON.parse(req.body.mapping); }catch(_){}
+  if(mapping && !(mapping.id || mapping.name)) mapping = null;
   const origName = fixName(req.file.originalname);
   try{
+    if(!mapping){
+      const sm = await smartMapping(full);
+      if(sm.question){
+        try{ fs.unlinkSync(full); }catch(_){}
+        return res.status(409).json({ error:'الملف يحتاج توضيحاً قبل الاستيراد', question:sm.question });
+      }
+      mapping = sm.mapping;
+    }
     const out = await roster.importFile(full, origName, mode, mapping);
     // «استبدال الكل» يستبدل بطاقة السجل أيضاً — لا نترك بطاقات لسجلات لم تعد قائمة
     if(mode === 'replace'){
@@ -422,7 +488,7 @@ app.post('/api/roster/import', auth, requireRole('admin'), upload.single('file')
       name:origName, status:'approved', mime:req.file.mimetype, path:'uploads/'+req.file.filename,
       content:`سجل طلاب مفهرس: ${out.count} طالب — تمت القراءة مرة واحدة عند الاستيراد.`, ts:Date.now() });
     db.saveNow();
-    res.json({ ok:true, ...out });
+    res.json({ ok:true, ...out, mapping });
   }catch(e){
     try{ fs.unlinkSync(full); }catch(_){}
     res.status(400).json({ error:'تعذّر قراءة الملف: ' + e.message });
@@ -574,15 +640,15 @@ app.post('/api/files', auth, requireRole('teacher','admin'), requirePerm('files'
     id:'f'+Date.now(), owner:req.user.id, ownerName:req.user.name, subject,
     name, status: (req.user.role==='admin' && isBrain) ? 'approved' : 'pending',
     mime, path:filePath, content, ts:Date.now(),
+    // وليّ الأمر لا يقرأ ملفاً إلا إذا أتاحه المدير له صراحةً (قد يحوي بيانات طلاب آخرين)
+    forParents: req.user.role === 'admin' && b.forParents === '1',
   };
   db.DB.files.push(f); saveDB();
-  // إكسل فيه أعمدة هوية؟ سجّله في السجل فوراً — وإلا رُفض دخول وليّ الأمر
-  // رغم أن «الملف فيه الهوية»
-  if(req.file && /\.xlsx?$/i.test(orig)){
-    try{
-      const auto = await roster.tryAutoIdentities(path.join(UPLOAD_DIR, req.file.filename), orig);
-      if(auto){ f.autoIdentities = auto; db.saveNow(); }
-    }catch(e){ console.error('تعذّر تسجيل الهويات تلقائياً:', e.message); }
+  // إكسل فيه هويات؟ يُسجَّل في السجل — لكن من المدير فقط.
+  // ملف المعلّم يُسجَّل عند قبوله، وإلا أمكن لمعلّم إضافة هوية وليّ أمر دون مراجعة.
+  if(req.file && req.user.role === 'admin' && /\.xlsx$/i.test(orig)){
+    f.autoIdentities = await autoIdentities(path.join(UPLOAD_DIR, req.file.filename), orig);
+    if(f.autoIdentities) db.saveNow();
   }
   if(req.user.role==='teacher'){
     const admin = db.DB.users.find(u=>u.role==='admin');
@@ -591,7 +657,7 @@ app.post('/api/files', auth, requireRole('teacher','admin'), requirePerm('files'
   res.json({ file:f });
 });
 
-app.put('/api/files/:id', auth, requireRole('admin'), (req,res)=>{
+app.put('/api/files/:id', auth, requireRole('admin'), async (req,res)=>{
   const f = db.DB.files.find(x=>x.id===req.params.id);
   if(!f) return res.status(404).json({ error:'غير موجود' });
   const b = req.body || {};
@@ -599,6 +665,11 @@ app.put('/api/files/:id', auth, requireRole('admin'), (req,res)=>{
   if(b.name!=null) f.name = b.name;
   if(b.content!=null) f.content = b.content;
   if(b.status && ['pending','approved','rejected'].includes(b.status)) f.status = b.status;
+  if(b.forParents != null) f.forParents = b.forParents === true || b.forParents === '1';
+  // قبول ملف إكسل من معلّم = الآن فقط تُسجَّل هوياته
+  if(f.status === 'approved' && prev !== 'approved' && !f.autoIdentities && /\.xlsx$/i.test(f.path || '')){
+    f.autoIdentities = await autoIdentities(path.join(__dirname, '..', 'public', f.path), f.name);
+  }
   saveDB();
   if(f.owner!==req.user.id){
     const msg = { approved:'تم قبول ملفك', rejected:'تم رفض ملفك — يرجى المراجعة', pending:'ملفك قيد المراجعة' }[f.status] || 'تحديث على ملفك';

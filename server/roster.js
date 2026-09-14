@@ -32,7 +32,9 @@ function normId(s){
   return stripped;
 }
 
-/* ---------- قراءة الإكسل (مرة واحدة) ---------- */
+/* ---------- قراءة الإكسل (مرة واحدة) ----------
+   خريطة الأعمدة يحدّدها الوكيل الذكي (agent.js) لأنه يفهم أي صياغة للترويسة.
+   قائمة HEAD أدناه احتياط فقط حين يتعذّر الوصول للذكاء — لا تُستعمل للفهم. */
 const HEAD = {
   id:['رقم الطالب','الرقم','id','رقم'],
   name:['اسم الطالب','الاسم','name'],
@@ -77,6 +79,7 @@ async function parseWorkbook(filePath, mapping){
   if(!headers.name && !headers.id) throw new Error('لا يوجد عمود «اسم الطالب» ولا «رقم الطالب» في الترويسة');
 
   const students = [];
+  let generatedIds = 0;   // صفوف بلا رقم طالب في الملف — نعطيها رقماً داخلياً، وليست هوية
   ws.eachRow((row, i) => {
     if(i === 1) return;
     const val = c => c ? row.getCell(c).value : null;
@@ -90,6 +93,7 @@ async function parseWorkbook(filePath, mapping){
       if(!isNaN(n) && val(col) !== null && val(col) !== '') grades[sub] = n;
     });
     const gv = Object.values(grades);
+    if(!idTxt) generatedIds++;
     students.push({
       id: idTxt || 'ST' + (1000 + i),
       name,
@@ -103,7 +107,7 @@ async function parseWorkbook(filePath, mapping){
       notes: txt(headers.notes),
     });
   });
-  return { students, subjects: subjectCols.map(s => s.name) };
+  return { students, subjects: subjectCols.map(s => s.name), generatedIds };
 }
 
 /* ---------- بناء الفهارس + الإحصاءات (مرة واحدة) ---------- */
@@ -193,15 +197,14 @@ async function importFile(filePath, fileName, mode = 'replace', mapping = null){
 
 /* أي ملف إكسل يُرفع لأي خانة: إن كان فيه أعمدة هوية، سجّلها في السجل تلقائياً.
    بدون هذا يرفع المدير ملفاً «فيه الهوية» ثم يُرفض دخول وليّ الأمر — وهو تناقض. */
-async function tryAutoIdentities(filePath, fileName){
+async function tryAutoIdentities(filePath, fileName, mapping = null){
   let parsed;
-  try{ parsed = await parseWorkbook(filePath, null); }catch(_){ return null; }
+  try{ parsed = await parseWorkbook(filePath, mapping); }catch(_){ return null; }
   const { students: incoming } = parsed;
   if(!incoming.length) return null;
-  // لا نسجّل إلا إذا وُجدت هوية فعلية: رقم طالب من الملف أو هوية وليّ أمر.
-  // (parseWorkbook يولّد ST#### تلقائياً للصفوف بلا رقم — تلك ليست هوية)
+  // لا نسجّل إلا إذا وُجدت هوية فعلية: رقم طالب من الملف نفسه أو هوية وليّ أمر
   const withGuardian = incoming.filter(s => s.guardianId).length;
-  const withRealId   = incoming.filter(s => s.id && !/^ST1\d{3}$/.test(s.id)).length;
+  const withRealId   = incoming.length - parsed.generatedIds;
   if(!withGuardian && !withRealId) return null;
   const prev = db.DB.roster;
   const before = prev && Array.isArray(prev.students) ? prev.students.length : 0;

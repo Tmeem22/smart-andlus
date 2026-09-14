@@ -285,6 +285,9 @@ function connectSocket(){
    PARENT — chat
    ============================================================ */
 let CONVOS = [], activeConvo = null;
+/* ذاكرة شات الإدارة/المعلّم: جلسة جديدة لكل فتح لصفحة المساعد */
+let SCHOOL_SESSION = null;
+const newSessionId = () => 's' + Date.now().toString(36) + Math.random().toString(16).slice(2, 8);
 
 /* بناء الأدوات البصرية من نتيجة (حيّة أو محفوظة) */
 function toolsHtml(r){
@@ -350,7 +353,7 @@ async function renderChat(v){
   el('chatIn').addEventListener('keydown', e => { if(e.key === 'Enter') sendChat(); });
 
   if(school){
-    activeChild = null; activeConvo = null;
+    activeChild = null; activeConvo = null; SCHOOL_SESSION = newSessionId();
     const st = el('stream'); st.innerHTML = '';
     botSay(rst.ready
       ? `أهلاً 👋 حفظت سجل <b>${rst.count} طالب</b> — اسألني عن أي طالب أو إحصائية وأجيب فوراً.`
@@ -447,13 +450,12 @@ async function renderRoster(v){
         </div>
         <div class="flex gap wrap center">
           <input type="file" id="rosterFile" accept=".xlsx" style="max-width:220px;padding:9px;border:1.5px solid var(--line);border-radius:12px">
-          <button class="btn" id="rosterSmart" title="الوكيل يقرأ الملف ويفصل الهويات والأسماء والمواد تلقائياً">🤖 تحليل ذكي</button>
           <button class="btn gold" id="rosterReplace" title="يمسح السجل الحالي ويضع الملف الجديد بدله">⬆️ استبدال الكل</button>
           <button class="btn ghost" id="rosterMerge" title="يدمج الملف مع السجل الحالي (يضيف طلاب/درجات بمطابقة رقم الطالب)">＋ إضافة/دمج</button>
           ${info.ready ? `<button class="btn danger" id="rosterClear" title="يمسح السجل من الذاكرة ويحذف ملفه — بعدها يصرّح البوت أنه لا يوجد سجل">🗑 حذف السجل</button>` : ''}
         </div>
       </div>
-      <p class="small muted" style="margin:10px 2px 0">💡 <b>استبدال الكل</b>: ملف كامل جديد. · <b>إضافة/دمج</b>: يدمج بمطابقة «رقم الطالب». · <b>تحليل ذكي</b>: الوكيل يفصل الأعمدة بنفسه.</p>
+      <p class="small muted" style="margin:10px 2px 0">🤖 الوكيل الذكي يقرأ أعمدة ملفك ويفهمها مهما كانت صياغتها، ويسألك إن احتاج. · <b>استبدال الكل</b>: ملف كامل جديد. · <b>إضافة/دمج</b>: يدمج بمطابقة رقم الطالب.</p>
     </div>
 
     <div class="card card-pad mb" style="border-color:var(--green)">
@@ -485,12 +487,11 @@ async function renderRoster(v){
       </div>
       <div id="rosterTable"><div class="empty-state small">جارٍ التحميل...</div></div>
     </div>`;
-  el('rosterSmart').onclick = smartImport;
-  el('rosterReplace').onclick = () => doImport('replace');
-  el('rosterMerge').onclick = () => doImport('merge');
+  el('rosterReplace').onclick = () => runImport('replace', el('rosterFile').files[0], el('rosterReplace'));
+  el('rosterMerge').onclick = () => runImport('merge', el('rosterFile').files[0], el('rosterMerge'));
   if(el('rosterClear')) el('rosterClear').onclick = clearRoster;
   el('idTemplate').onclick = downloadIdTemplate;
-  el('idUpload').onclick = uploadIdentities;
+  el('idUpload').onclick = () => runImport('merge', el('idFile').files[0], el('idUpload'));
   animateCounts();
   const sb = el('rosterSearch');
   if(sb){ let t; sb.oninput = () => { clearTimeout(t); t = setTimeout(()=>{ rosterQ = sb.value.trim(); rosterPage = 1; loadRosterTable(); }, 250); }; }
@@ -522,77 +523,53 @@ async function downloadIdTemplate(){
 }
 
 /* رفع ملف الهويات: الوكيل يفصل الأعمدة ثم يُدمج مباشرة */
-async function uploadIdentities(){
-  const f = el('idFile').files[0];
-  if(!f){ toast('اختر ملف الهويات (.xlsx) أولاً'); return; }
-  const b = el('idUpload'); b.disabled = true; b.textContent = '🤖 يقرأ ويسجّل...';
-  try{
-    const fd = new FormData(); fd.append('file', f);
-    const a = await api('/api/roster/analyze', { method:'POST', form:fd });
-    if(a.question){ b.disabled = false; b.textContent = '🔐 رفع وتسجيل الهويات'; showAgentResult(a, f); return; }
-    const m = a.mapping || {};
-    if(!m.id && !m.guardianId){ throw new Error('لم أجد عمود «رقم الطالب» ولا «هوية ولي الأمر» — استخدم النموذج.'); }
-    const fd2 = new FormData(); fd2.append('file', f); fd2.append('mode','merge'); fd2.append('mapping', JSON.stringify(m));
-    const r = await api('/api/roster/import', { method:'POST', form:fd2 });
-    toast(`تم تسجيل الهويات — ${r.count} طالب ✅`);
-    go('roster');
-  }catch(e){ toast(e.message); b.disabled = false; b.textContent = '🔐 رفع وتسجيل الهويات'; }
+/* ---------- الاستيراد ----------
+   الوكيل الذكي يقرأ أعمدة الملف أولاً ويفهمها أياً كانت صياغتها.
+   إن احتاج توضيحاً يسأل بخيارات — وجوابك يُعاد له ليبني الخريطة عليه، ثم يُستورد الملف. */
+async function analyzeFile(file, clarify){
+  const fd = new FormData(); fd.append('file', file);
+  if(clarify) fd.append('clarify', JSON.stringify(clarify));
+  return api('/api/roster/analyze', { method:'POST', form:fd });
 }
-
-/* الوكيل الذكي: يحلّل الملف ويفصل الأعمدة، ويسأل بخيارات عند الحاجة */
-async function smartImport(){
-  const f = el('rosterFile').files[0];
-  if(!f){ toast('اختر ملف .xlsx أولاً'); return; }
-  const b = el('rosterSmart'); b.disabled = true; b.textContent = '🤖 يحلّل...';
+async function runImport(mode, file, btn, clarify){
+  if(!file){ toast('اختر ملف .xlsx أولاً'); return; }
+  if(mode === 'replace' && !clarify && !confirm('استبدال كل السجل الحالي بهذا الملف؟')) return;
+  const label = btn ? btn.textContent : '';
+  if(btn){ btn.disabled = true; btn.textContent = '🤖 يقرأ الملف...'; }
   try{
-    const fd = new FormData(); fd.append('file', f);
-    const a = await api('/api/roster/analyze', { method:'POST', form:fd });
-    showAgentResult(a, f);
-  }catch(e){ toast(e.message); }
-  b.disabled = false; b.textContent = '🤖 تحليل ذكي';
-}
-function showAgentResult(a, file){
-  const m = a.mapping || {};
-  const kind = { identities:'ملف هويات (تسجيل دخول)', grades:'ملف درجات مواد', mixed:'ملف شامل (هويات + درجات)' }[a.kind] || 'غير محدد';
-  const rows = [['رقم الطالب',m.id],['اسم الطالب',m.name],['الصف',m.level],['الفصل',m.section],
-    ['وليّ الأمر',m.guardian],['هوية وليّ الأمر',m.guardianId],['الحضور',m.attendance],['ملاحظات',m.notes]]
-    .filter(([,v])=>v).map(([k,v])=>`<div class="r-row"><span class="r-sub">${k}</span><span class="small">${esc(v)}</span></div>`).join('');
-  const subs = (m.subjects||[]).map(s=>`<span class="tag approved" style="margin:2px">${esc(s)}</span>`).join('') || '<span class="small muted">لا مواد</span>';
-  let body = `<p class="small">حلّلتُ <b>${esc(a.fileName || file.name)}</b> — ${a.totalRows} صف.</p>
-    <span class="chip">${kind}</span>
-    <div class="rep-sec">الأعمدة المتعرّف عليها</div>${rows || '<span class="small muted">لم أتعرّف على أعمدة الهوية</span>'}
-    <div class="rep-sec">المواد المكتشفة</div>${subs}`;
-  if(a.question){
-    body += `<div class="rep-sec">يحتاج توضيحاً منك</div><p class="small">${esc(a.question.text)}</p>
-      <div class="flex gap wrap" id="agentQ">${(a.question.options||[]).map((o,i)=>`<button class="btn ghost sm" data-i="${i}">${esc(o)}</button>`).join('')}</div>
-      <div class="small muted mt" id="agentPick">— لم تختر بعد</div>`;
-  }
-  modal('🤖 نتيجة الوكيل', body, [
-    { t:'＋ إضافة/دمج', cls:'btn', fn:()=>{ closeModal(); doImport('merge', m); } },
-    { t:'⬆️ استبدال الكل', cls:'btn gold', fn:()=>{ closeModal(); doImport('replace', m); } },
-    { t:'إلغاء', cls:'btn ghost', fn:closeModal },
-  ]);
-  const qb = el('agentQ');
-  if(qb) qb.querySelectorAll('button').forEach(btn => btn.onclick = () => {
-    qb.querySelectorAll('button').forEach(x => x.classList.add('ghost'));
-    btn.classList.remove('ghost');
-    el('agentPick').textContent = 'اخترت: ' + btn.textContent;
-  });
-}
-
-async function doImport(mode, mapping){
-  const f = el('rosterFile').files[0];
-  if(!f){ toast('اختر ملف .xlsx أولاً'); return; }
-  if(mode==='replace' && !confirm('استبدال كل السجل الحالي بهذا الملف؟')) return;
-  const rb = el('rosterReplace'), mb = el('rosterMerge');
-  rb.disabled = mb.disabled = true; (mode==='merge'?mb:rb).textContent = '⏳ جارٍ...';
-  const fd = new FormData(); fd.append('file', f); fd.append('mode', mode);
-  if(mapping) fd.append('mapping', JSON.stringify(mapping));
-  try{
+    const a = await analyzeFile(file, clarify);
+    if(a.question && !clarify){ askAgent(a, mode, file); return; }
+    const m = a.ok ? (a.mapping || {}) : {};
+    const fd = new FormData(); fd.append('file', file); fd.append('mode', mode);
+    if(m.id || m.name) fd.append('mapping', JSON.stringify(m));
     const r = await api('/api/roster/import', { method:'POST', form:fd });
-    toast(`${mode==='merge'?'تم الدمج':'تم الاستبدال'} — ${r.count} طالب في ${r.ms}ms ✅`);
+    const found = [m.id && 'رقم الطالب', m.name && 'الاسم', m.guardianId && 'هوية وليّ الأمر'].filter(Boolean);
+    const subs = (m.subjects || []).length;
+    toast(`${mode === 'merge' ? 'تم الدمج' : 'تم الاستبدال'} — ${r.count} طالب`
+      + (found.length ? ` · فهمتُ: ${found.join('، ')}${subs ? ' و' + subs + ' مواد' : ''}` : '') + ' ✅');
     rosterPage = 1; rosterQ = ''; go('roster');
-  }catch(e){ toast(e.message); rb.disabled = mb.disabled = false; go('roster'); }
+  }catch(e){ toast(e.message); }
+  finally{ if(btn && document.body.contains(btn)){ btn.disabled = false; btn.textContent = label; } }
+}
+function askAgent(a, mode, file){
+  modal('🤖 الوكيل يحتاج توضيحاً', `
+    <p class="small">قرأتُ <b>${esc(a.fileName || file.name)}</b> (${a.totalRows} صف)، وعندي سؤال قبل الاستيراد:</p>
+    <p><b>${esc(a.question.text)}</b></p>
+    <div class="flex gap wrap" id="agentQ">${(a.question.options || []).map(o => `<button class="btn ghost sm">${esc(o)}</button>`).join('')}</div>
+    <div class="field mt"><label>أو اكتب جوابك بكلامك</label><input id="agentFree" placeholder="مثلاً: العمود الثالث هو رقم الطالب"></div>`,
+    [{ t:'متابعة بهذا الجواب', cls:'btn', fn: () => {
+        const picked = document.querySelector('#agentQ .btn:not(.ghost)');
+        const answer = el('agentFree').value.trim() || (picked && picked.textContent.trim());
+        if(!answer){ toast('اختر جواباً أو اكتبه'); return; }
+        closeModal();
+        runImport(mode, file, null, { question:a.question.text, answer });
+      } },
+     { t:'إلغاء', cls:'btn ghost', fn:closeModal }]);
+  const qb = el('agentQ');
+  if(qb) qb.querySelectorAll('button').forEach(b => b.onclick = () => {
+    qb.querySelectorAll('button').forEach(x => x.classList.add('ghost'));
+    b.classList.remove('ghost');
+  });
 }
 async function loadRosterTable(){
   const box = el('rosterTable'); if(!box) return;
@@ -623,7 +600,11 @@ function typingBubble(){ const st = el('stream'); const w = document.createEleme
 function fill(b, html){ b.classList.remove('typing'); b.innerHTML = html; const st = el('stream'); if(st) st.scrollTop = st.scrollHeight; }
 
 /* يشيل رموز الأدوات + أي رمز ناقص أثناء البثّ */
-function cleanLive(t){ return t.replace(/::CHART::|::DONUT::|::REPORT::/g,'').replace(/:{1,2}[A-Z]*:?$/,''); }
+/* يخفي سطر قرار المرفقات لو ظهر أثناء البثّ (السيرفر يحجبه أصلاً — هذا احتياط) */
+function cleanLive(t){
+  return t.replace(/<<\s*مرفقات\s*:[^>]*>>/g,'').replace(/<<[^>]*$/,'')
+          .replace(/::(CHART|DONUT|REPORT|TOP)::/g,'').replace(/:{1,2}[A-Z]*:?$/,'');
+}
 function scrollStream(){ const st = el('stream'); if(st) st.scrollTop = st.scrollHeight; }
 
 async function sendChat(){
@@ -635,7 +616,7 @@ async function sendChat(){
     const res = await fetch('/api/chat/stream', {
       method:'POST',
       headers:{ 'Content-Type':'application/json', 'Authorization':'Bearer '+TOKEN },
-      body: JSON.stringify({ studentId:activeChild, message:q, convoId:activeConvo }),
+      body: JSON.stringify({ studentId:activeChild, message:q, convoId:activeConvo, sessionId:SCHOOL_SESSION }),
     });
     if(!res.ok || !res.body) throw new Error('HTTP '+res.status);
     const reader = res.body.getReader(); const dec = new TextDecoder(); let buf = '';
@@ -677,29 +658,21 @@ async function sendChat(){
   };
   if(final){ renderResult(final); return; }
 
-  // احتياط: طلب غير متدفّق — يعمل على متصفحات الجوال التي لا تدعم البثّ
+  // احتياط: طلب غير متدفّق — للمتصفحات التي لا تدعم البثّ
   try{
-    const r = await api('/api/chat', { method:'POST', body:{ studentId:activeChild, message:q, convoId:activeConvo } });
-    if(r.fallback) throw new Error(r.error || 'ai');
+    const r = await api('/api/chat', { method:'POST', body:{ studentId:activeChild, message:q, convoId:activeConvo, sessionId:SCHOOL_SESSION } });
     renderResult(r); return;
   }catch(e2){
-    const s = failed && failed.student;
-    fill(b, `<p class="small muted" style="margin:0 0 8px">⚠️ تعذّر الاتصال بالمساعد الذكي — ${esc((failed&&failed.error)||e2.message||'')}</p>`
-          + (s && s.grades ? localReply(q, s, failed.avg || 0) : ''));
+    // لا ردود «مصطنعة» بكلمات محفوظة — إن تعذّر الذكاء نقولها بوضوح
+    fill(b, `<p style="margin:0 0 8px">⚠️ تعذّر الوصول إلى المساعد الذكي الآن.</p>
+      <p class="small muted" style="margin:0 0 10px">${esc((failed && failed.error) || e2.message || '')}</p>
+      <button class="btn ghost sm" onclick="retryChat(this)" data-q="${esc(q)}">إعادة المحاولة</button>`);
   }
 }
-/* fallback محلي */
-function localReply(q, s, avg){
-  const t = q.toLowerCase(); const has = (...w) => w.some(x => t.includes(x));
-  const ge = Object.entries(s.grades);
-  if(has('تقرير','report','كشف كامل')) return repCardBoxIntro(s, avg);
-  if(has('رسم','بياني','chart','مخطط')) return `الرسم البياني لدرجات <b>${esc(s.name)}</b> (المتوسط ${avg}%):`+barChart(s.grades,`درجات الطالب ${s.name}`,`${s.grade||''} ${s.classNo||''}`);
-  if(has('حضور','غياب','attendance')) return `نسبة حضور <b>${esc(s.name)}</b> هي <b>${s.attendance}%</b>. ${donut(s.attendance,'المواظبة',`حضور الطالب ${s.name}`,s.classNo||'')}`;
-  if(has('أفضل','افضل','أضعف','اضعف','best','worst')){
-    const sr = [...ge].sort((a,b)=>b[1]-a[1]); const top = sr[0], low = sr[sr.length-1];
-    return `<p>أقوى مادة: <b style="color:var(--ok)">${esc(top[0])} (${top[1]}%)</b> ⭐</p><p>تحتاج تحسين: <b style="color:var(--danger)">${esc(low[0])} (${low[1]}%)</b></p>`+barChart(s.grades,`درجات الطالب ${s.name}`,`${s.grade||''} ${s.classNo||''}`);
-  }
-  return `<p>ملخص <b>${esc(s.name)}</b> — المعدل ${avg}% · الحضور ${s.attendance}%</p><p class="small muted">${esc(s.notes||'')}</p>`+barChart(s.grades,`درجات الطالب ${s.name}`,`${s.grade||''} ${s.classNo||''}`);
+function retryChat(btn){
+  const q = btn.dataset.q; const bubble = btn.closest('.msg, .bubble');
+  if(bubble && bubble.parentElement) bubble.parentElement.removeChild(bubble);
+  el('chatIn').value = q; sendChat();
 }
 
 /* ============================================================
@@ -799,7 +772,6 @@ function repCardBox(s, avg){
     <div class="report-foot"><span>تاريخ الإصدار: ${d}</span><span>وثيقة تجريبية — غير رسمية</span></div></div>
     <button class="btn ghost sm mt" onclick="window.print()">🖨️ طباعة / حفظ التقرير</button>`;
 }
-function repCardBoxIntro(s,avg){ return `<p>تفضّلوا التقرير الكامل للطالب <b>${esc(s.name)}</b>:</p>`+repCardBox(s,avg); }
 
 /* ============================================================
    PARENT — children overview
@@ -846,9 +818,7 @@ function openUpload(){
       try{
         const r = await api('/api/files', { method:'POST', form:fd });
         closeModal(); go('tfiles');
-        const ai = r.file && r.file.autoIdentities;
-        toast(ai ? `تم الرفع ✅ وسُجّلت بيانات ${ai.total} طالب في السجل`
-                 : 'تم رفع الملف وإرساله للمدير ✅');
+        toast('تم رفع الملف وإرساله للمدير ✅');   // هويات ملف المعلّم تُسجَّل عند قبول المدير فقط
       }catch(e){ toast(e.message); }
     }}, { t:'إلغاء', cls:'btn ghost', fn:closeModal }]);
 }
@@ -868,10 +838,21 @@ async function viewFile(id){
       { t:'✖ رفض', cls:'btn danger', fn: async () => { await api('/api/files/'+id, { method:'PUT', body:{ status:'rejected' } }); closeModal(); refreshView(); toast('تم رفض الملف'); } },
       { t:'✏️ تعديل', cls:'btn ghost', fn: () => editFile(f) },
       { t:'✉️ مراسلة المعلم', cls:'btn gold', fn: () => { closeModal(); go('messages'); setTimeout(()=>openThread(f.owner), 200); } },
+      { t: f.forParents ? '👪 إخفاء عن أولياء الأمور' : '👪 إتاحة لأولياء الأمور', cls:'btn ghost', fn: () => toggleForParents(f) },
       { t:'🗑 حذف', cls:'btn danger', fn: () => delFile(f) },
     ];
   }
   modal('عرض الملف', body, btns);
+}
+/* إتاحة ملف لبوت أولياء الأمور — يُحذَّر المدير لأن ملف الدرجات العام فيه طلاب آخرون */
+async function toggleForParents(f){
+  const next = !f.forParents;
+  if(next && !confirm(`إتاحة «${f.name}» لبوت أولياء الأمور؟\n\nأي وليّ أمر يستطيع أن يسأل عن محتواه. لا تتحه إن كان فيه درجات أو بيانات طلاب غير ابنه.`)) return;
+  try{
+    await api('/api/files/' + f.id, { method:'PUT', body:{ forParents:next } });
+    closeModal(); refreshView();
+    toast(next ? 'صار الملف متاحاً لأولياء الأمور' : 'أُخفي الملف عن أولياء الأمور');
+  }catch(e){ toast(e.message); }
 }
 /* حذف ملف نهائياً — وينبّه إن كان هو مصدر سجل الطلاب */
 async function delFile(f){
@@ -1160,18 +1141,22 @@ function openBrainUpload(){
   modal('تغذية عقل البوت', `
     <div class="field"><label>اسم المصدر</label><input id="bName" placeholder="مثال: كشف درجات الصف الثاني"></div>
     <div class="field"><label>ارفع ملفاً (اختياري)</label><input id="bFile" type="file"></div>
-    <div class="field"><label>أو المحتوى المعرفي نصياً</label><textarea id="bC" rows="6" placeholder="بيانات الطلاب / الدرجات..."></textarea></div>`,
+    <div class="field"><label>أو المحتوى المعرفي نصياً</label><textarea id="bC" rows="6" placeholder="بيانات الطلاب / الدرجات..."></textarea></div>
+    <label class="flex center gap small" style="margin-top:4px"><input type="checkbox" id="bParents">
+      <span><b>متاح لأولياء الأمور</b> — فقط لمعلومات عامة (تقويم، لوائح، إعلانات). لا تفعّله لملف فيه درجات أو بيانات طلاب.</span></label>`,
     [{ t:'تغذية البوت', cls:'btn', fn: async () => {
       const name = el('bName').value.trim(); if(!name){ toast('أدخل الاسم'); return; }
       const fd = new FormData(); fd.append('brain','1'); fd.append('name', name);
+      if(el('bParents').checked) fd.append('forParents', '1');
       if(el('bFile').files[0]) fd.append('file', el('bFile').files[0]);
       if(el('bC').value.trim()) fd.append('content', el('bC').value.trim());
       try{
         const r = await api('/api/files', { method:'POST', form:fd });
         closeModal(); go('brain');
         const ai = r.file && r.file.autoIdentities;
-        toast(ai ? `تمت التغذية ✅ وسُجّلت الهويات تلقائياً (${ai.total} طالب) — أولياء الأمور يقدرون يدخلون الآن`
-                 : 'تمت تغذية البوت ✅');
+        toast(!ai ? 'تمت تغذية البوت ✅'
+          : ai.needsReview ? `تمت التغذية ✅ — لكن الوكيل غير متأكد من أعمدة الهويات («${ai.question}»). استوردها من «سجل الطلاب» ليسألك.`
+          : `تمت التغذية ✅ وسُجّلت الهويات (${ai.total} طالب) — أولياء الأمور يقدرون يدخلون الآن`);
       }catch(e){ toast(e.message); }
     }}, { t:'إلغاء', cls:'btn ghost', fn:closeModal }]);
 }
@@ -1287,7 +1272,7 @@ function timeAgo(ts){ const d=(Date.now()-ts)/1000; if(d<60)return'الآن'; if
 /* expose for inline onclick */
 function setChild(id){ activeChild = id; go('chat'); }
 Object.assign(window, { go, viewFile, filterFiles, openTeacher, delTeacher, openStudent, delStudent, studGo,
-  delFile, clearRoster, setTeacherPass, openThread, sendMsg, closeModal, setChild, rosterGo, openConvo, delConvo });
+  delFile, clearRoster, setTeacherPass, retryChat, toggleForParents, openThread, sendMsg, closeModal, setChild, rosterGo, openConvo, delConvo });
 
 /* ============================================================
    مؤشّر مخصّص — نقطة دقيقة + حلقة تتبع بتأخير، تكبر على العناصر
