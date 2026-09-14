@@ -47,6 +47,33 @@ let DB;
 /* ---------- التخزين: MongoDB (دائم) إن وُجد MONGODB_URI، وإلا ملف محلي ---------- */
 const URI = process.env.MONGODB_URI || '';
 let coll = null;   // مجموعة Mongo عند التفعيل
+let blobs = null;  // محتوى الملفات الأصلية (منفصل: وثيقة الحالة سقفها 16MB)
+
+/* ---------- الملفات الأصلية ----------
+   قرص الاستضافة المجانية يُمسح عند كل تحديث أو خمول، فالملف يُحفظ في Mongo.
+   محلياً يُحفظ في server/blobs — خارج public فلا يُنزَّل بلا تسجيل دخول. */
+const BLOB_DIR = path.join(__dirname, 'blobs');
+const blobKey = id => String(id).replace(/[^A-Za-z0-9_-]/g, '');
+async function putBlob(id, buffer, mime){
+  if(blobs){ await blobs.replaceOne({ _id:blobKey(id) }, { _id:blobKey(id), mime, size:buffer.length, data:buffer }, { upsert:true }); return; }
+  fs.mkdirSync(BLOB_DIR, { recursive:true });
+  fs.writeFileSync(path.join(BLOB_DIR, blobKey(id)), buffer);
+}
+async function getBlob(id){
+  if(blobs){
+    const d = await blobs.findOne({ _id:blobKey(id) });
+    if(!d || !d.data) return null;
+    return { data: Buffer.from(d.data.buffer || d.data), mime:d.mime };
+  }
+  const p = path.join(BLOB_DIR, blobKey(id));
+  return fs.existsSync(p) ? { data: fs.readFileSync(p), mime:null } : null;
+}
+async function delBlob(id){
+  try{
+    if(blobs) await blobs.deleteOne({ _id:blobKey(id) });
+    else fs.unlinkSync(path.join(BLOB_DIR, blobKey(id)));
+  }catch(_){}
+}
 
 function loadFile(){
   try {
@@ -62,7 +89,9 @@ async function init(){
     const { MongoClient } = require('mongodb');
     const client = new MongoClient(URI, { serverSelectionTimeoutMS: 15000 });
     await client.connect();
-    coll = client.db(process.env.MONGODB_DB || 'smart_andlus').collection('state');
+    const mdb = client.db(process.env.MONGODB_DB || 'smart_andlus');
+    coll = mdb.collection('state');
+    blobs = mdb.collection('blobs');
     const doc = await coll.findOne({ _id: 'db' });
     if(doc && doc.data){ DB = doc.data; }
     else { DB = seed(); await coll.replaceOne({ _id:'db' }, { _id:'db', data:DB }, { upsert:true }); }
@@ -96,4 +125,5 @@ function saveDB(){ clearTimeout(saveTimer); saveTimer = setTimeout(persist, 150)
 function saveNow(){ persist(); }
 function resetDB(){ DB = seed(); saveNow(); return DB; }
 
-module.exports = { get DB(){ return DB; }, init, saveDB, saveNow, resetDB, hashPw, verifyPw, SUBJECTS, PERMS };
+module.exports = { get DB(){ return DB; }, init, saveDB, saveNow, resetDB, hashPw, verifyPw, SUBJECTS, PERMS,
+  putBlob, getBlob, delBlob };

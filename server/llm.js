@@ -176,7 +176,13 @@ async function pickRelevantFiles(question, files){
 
 async function brainNotes(question, audience){
   const files = readableFiles(audience, db.DB.files);
-  if(!files.length) return '';
+  // ملفات معتمدة تعذّرت قراءتها: نذكرها كي لا يحكم البوت أنها «تالفة» ويعرف أنها تحتاج إعادة رفع
+  const lost = audience === 'parent' ? [] : (db.DB.files || [])
+    .filter(f => f.status === 'approved' && f.needsReupload && !f.content && f.subject !== 'سجل الطلاب');
+  const lostNote = lost.length
+    ? `\n\nملفات مسجّلة لكن محتواها غير متاح (فُقد أصلها من الخادم قبل تحديث التخزين) — إن سُئلت عنها فاطلب إعادة رفعها من «مركز الملفات»:\n${lost.map(f => `• ${f.name}`).join('\n')}`
+    : '';
+  if(!files.length) return lostNote.trim();
   const total = files.reduce((n, f) => n + String(f.content).length, 0);
   const chosen = total > FILE_BUDGET && files.length > 1 ? await pickRelevantFiles(question, files) : files;
   const per = Math.max(1500, Math.floor(FILE_BUDGET / Math.max(1, chosen.length)));
@@ -185,7 +191,7 @@ async function brainNotes(question, audience){
     const c = String(f.content);
     return `# «${f.name}»\n${c.slice(0, per)}${c.length > per ? '\n…(بقية الملف مقتطعة)' : ''}`;
   }).join('\n\n');
-  return `فهرس الملفات المتاحة:\n${index}${bodies ? '\n\n' + bodies : '\n\n(لا يلزم محتوى ملف لهذا السؤال)'}`;
+  return `فهرس الملفات المتاحة:\n${index}${bodies ? '\n\n' + bodies : '\n\n(لا يلزم محتوى ملف لهذا السؤال)'}${lostNote}`;
 }
 
 /* خانات المنصة: المدير يرى الكل، المعلّم ملفاته فقط */
@@ -320,11 +326,11 @@ async function streamLLM(messages, onToken, onReason){
 const MEM_TURNS = +process.env.CHAT_MEMORY_TURNS || 4;
 const MEM_MSGS  = MEM_TURNS * 2;
 
-/* من محادثة وليّ الأمر المحفوظة (دائمة) */
-function historyFromConvo(convo){
+/* من المحادثة المحفوظة (دائمة) — withStudent للإدارة والمعلّم حيث يتغيّر الطالب محلّ الحديث */
+function historyFromConvo(convo, { withStudent = false } = {}){
   return ((convo && convo.msgs) || []).slice(-MEM_MSGS).map(m => m.role === 'user'
     ? { role:'user', content:String(m.text || '') }
-    : { role:'assistant', content:directiveFor(m) + '\n' + String(m.text || '') });   // طالب وليّ الأمر ثابت
+    : { role:'assistant', content:directiveFor(m, withStudent && m.student && m.student.id) + '\n' + String(m.text || '') });
 }
 
 function buildMessages(systemPrompt, history, question){
@@ -336,7 +342,7 @@ function buildMessages(systemPrompt, history, question){
 async function titleFor(question){
   try{
     const t = await askLLM([
-      { role:'system', content:'أعطِ عنواناً عربياً قصيراً جداً (٢-٤ كلمات) يلخّص موضوع سؤال وليّ الأمر. أعد العنوان فقط بلا علامات اقتباس أو ترقيم أو شرح.' },
+      { role:'system', content:'أعطِ عنواناً عربياً قصيراً جداً (٢-٤ كلمات) يلخّص موضوع سؤال مستخدم في منصة مدرسية. أعد العنوان فقط بلا علامات اقتباس أو ترقيم أو شرح.' },
       { role:'user', content:String(question).slice(0, 300) },
     ], { max_tokens:400 });
     return String(t).replace(/["'«»`.\n\r]/g, ' ').replace(/\s+/g, ' ').trim().slice(0, 40);

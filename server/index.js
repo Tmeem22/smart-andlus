@@ -28,7 +28,9 @@ const llm = require('./llm');
 const { DB, saveDB, resetDB, verifyPw, hashPw, SUBJECTS, PERMS } = db;
 
 const PORT = process.env.PORT || 8731;
-const UPLOAD_DIR = path.join(__dirname, '..', 'public', 'uploads');
+/* نسخة مؤقتة فقط أثناء المعالجة — الملف الدائم في db.putBlob.
+   (كانت في public/uploads: تُمسح مع كل تحديث للاستضافة، وتُنزَّل بلا تسجيل دخول لمن عرف الرابط) */
+const UPLOAD_DIR = path.join(require('os').tmpdir(), 'andlus-uploads');
 fs.mkdirSync(UPLOAD_DIR, { recursive:true });
 
 const app = express();
@@ -115,11 +117,57 @@ function repairNames(){
   if(n) db.saveNow();
   return n;
 }
-/* حذف نسخة الملف من القرص (بهدوء) — كي لا تتضخّم uploads بملفات بلا سجل */
-function rmUpload(p){
-  if(!p) return;
-  try{ fs.unlinkSync(path.join(__dirname,'..','public', p)); }catch(_){}
+/* ملفات رُفعت قبل الإصلاح: نص إكسل تالف أو أصل فُقد مع قرص الاستضافة.
+   نعيد الاستخراج إن توفّر الأصل، وإلا نعلّمها «تحتاج إعادة رفع» بدل أن يحكم البوت أنها تالفة. */
+async function repairFiles(){
+  let n = 0;
+  for(const f of (db.DB.files || [])){
+    const broken = /\[object Object\]/.test(f.content || '');
+    const legacyMissing = !!(f.path && !fs.existsSync(path.join(__dirname,'..','public', f.path)));
+    if(!broken && !legacyMissing) continue;
+    if(f.subject === 'سجل الطلاب'){ if(legacyMissing){ f.path = null; n++; } continue; }   // السجل نفسه محفوظ في القاعدة
+    if(broken){
+      const txt = await withFileOnDisk(f, p => extract.extractText(p, f.origName || f.path || f.name, f.mime)).catch(() => '');
+      if(txt){ f.content = txt; f.needsReupload = false; n++; continue; }
+      f.content = '';
+    }
+    f.needsReupload = true;
+    if(legacyMissing) f.path = null;
+    n++;
+  }
+  if(n) db.saveNow();
+  return n;
 }
+/* حذف محتوى الملف الأصلي أينما كان */
+function dropFileBytes(f){
+  if(!f) return;
+  if(f.blob) db.delBlob(f.id);
+  if(f.path){ try{ fs.unlinkSync(path.join(__dirname,'..','public', f.path)); }catch(_){} }
+}
+/* يحفظ الملف المرفوع في التخزين الدائم ثم يحذف نسخته المؤقتة */
+async function keepUpload(id, file){
+  const tmp = path.join(UPLOAD_DIR, file.filename);
+  try{
+    const buf = fs.readFileSync(tmp);
+    await db.putBlob(id, buf, file.mimetype);
+    return buf.length;
+  }finally{ try{ fs.unlinkSync(tmp); }catch(_){} }
+}
+/* يُخرج محتوى ملف محفوظ إلى مسار مؤقت ليُقرأ (إكسل/PDF) ثم يحذفه */
+async function withFileOnDisk(f, fn){
+  if(f.path){
+    const p = path.join(__dirname,'..','public', f.path);
+    return fs.existsSync(p) ? fn(p) : null;
+  }
+  if(!f.blob) return null;
+  const b = await db.getBlob(f.id);
+  if(!b) return null;
+  const ext = path.extname(f.origName || '') || '';
+  const tmp = path.join(UPLOAD_DIR, 'blob-' + f.id + ext);
+  fs.writeFileSync(tmp, b.data);
+  try{ return await fn(tmp); }finally{ try{ fs.unlinkSync(tmp); }catch(_){} }
+}
+const isXlsx = f => /\.xlsx$/i.test(f.origName || f.path || '');
 function contactsFor(u){
   if(u.role==='admin')   return db.DB.users.filter(x=>x.role==='teacher').map(publicUser);
   if(u.role==='teacher') return db.DB.users.filter(x=>x.role==='admin'||(x.role==='teacher'&&x.id!==u.id)).map(publicUser);
@@ -189,21 +237,6 @@ function clientStudent(s){
     attendance:s.attendance || 0, grades:s.grades || {}, notes:s.notes || '' };
 }
 
-/* ذاكرة شات الإدارة والمعلّم: لكل فتحة صفحة ذاكرتها.
-   (وليّ الأمر ذاكرته هي محادثته المحفوظة نفسها — تبقى بعد إعادة التشغيل) */
-const SCHOOL_SESS = new Map();
-function schoolSession(user, sessionId){
-  const key = user.id + ':' + String(sessionId || 'default').slice(0, 48);
-  let s = SCHOOL_SESS.get(key);
-  if(!s){ s = { hist:[], lastSid:null, ts:0 }; SCHOOL_SESS.set(key, s); }
-  s.ts = Date.now();
-  if(SCHOOL_SESS.size > 500){
-    [...SCHOOL_SESS.entries()].sort((a,b)=> a[1].ts - b[1].ts).slice(0, SCHOOL_SESS.size - 400)
-      .forEach(([k])=> SCHOOL_SESS.delete(k));
-  }
-  return s;
-}
-
 /* طلاب مُضافون يدوياً يطابقون رقماً أو اسماً كاملاً في الرسالة */
 function manualMatches(message){
   const q = roster.norm(message);
@@ -223,13 +256,14 @@ async function resolveChat(user, body){
       history: llm.historyFromConvo(convo && convo.sid === sid ? convo : null),
       system: await llm.promptForParent(clientStudent(s), avg, message) };
   }
-  // الإدارة والمعلّم: البحث في السجل يجلب مرشّحين، والنموذج يقرّر من المقصود
-  const sess = schoolSession(user, body.sessionId);
+  // الإدارة والمعلّم: ذاكرتها محادثتها المحفوظة، والبحث يجلب مرشّحين والنموذج يقرّر من المقصود
+  const convo = body.convoId && (db.DB.convos[user.id] || []).find(c => c.id === body.convoId);
+  const lastBot = convo && [...convo.msgs].reverse().find(m => m.role === 'bot' && m.student && m.student.id);
   const candidates = [...(roster.ready() ? roster.findStudents(message, 4) : []), ...manualMatches(message)];
-  const last = sess.lastSid && findStudentAny(sess.lastSid);
+  const last = lastBot && findStudentAny(lastBot.student.id);
   if(last && !candidates.some(c => c.id === last.id)) candidates.push(last);
-  return { message, role:user.role, sess, student:null, avg:null,
-    history: sess.hist,
+  return { message, role:user.role, student:null, avg:null,
+    history: llm.historyFromConvo(convo, { withStudent:true }),
     system: await llm.promptForSchool(message, user, candidates.slice(0, 6)) };
 }
 
@@ -241,7 +275,6 @@ function buildDone(full, ctx){
     const pick = d.student ? findStudentAny(d.student) : null;
     student = pick ? clientStudent(pick) : null;
     avg = pick ? avgOf(pick) : null;
-    if(pick && ctx.sess) ctx.sess.lastSid = pick.id;
   }
   const hasGrades = !!(student && student.grades && Object.keys(student.grades).length);
   const st = roster.stats();
@@ -262,19 +295,14 @@ function buildDone(full, ctx){
 /* بعد اكتمال الرد: طبّق القرار، حدّث الذاكرة، واحفظ المحادثة */
 function finishTurn(req, ctx, full){
   const out = buildDone(full, ctx);
-  if(ctx.sess){
-    ctx.sess.hist.push({ role:'user', content:ctx.message },
-      { role:'assistant', content: llm.directiveFor(out, out.student && out.student.id) + '\n' + out.text });
-    if(ctx.sess.hist.length > llm.MEM_MSGS) ctx.sess.hist.splice(0, ctx.sess.hist.length - llm.MEM_MSGS);
-  }
   const cv = saveConvoTurn(req.user, req.body.convoId, req.body.studentId, ctx.message, out);
   out.convoId = cv.convoId; out.convoTitle = cv.title;
   return out;
 }
 
-/* حفظ دورة محادثة في سجل وليّ الأمر + توليد عنوان AI للمحادثة الجديدة */
+/* حفظ دورة محادثة (لكل الحسابات) + توليد عنوان AI للمحادثة الجديدة */
 function saveConvoTurn(user, convoId, sid, userText, botOut){
-  if(user.role !== 'parent') return {};
+  if(user.role !== 'parent') sid = null;   // محادثة الإدارة/المعلّم لا تخصّ طالباً واحداً
   const list = db.DB.convos[user.id] = db.DB.convos[user.id] || [];
   let convo = convoId && list.find(c=>c.id===convoId);
   let isNew = false;
@@ -296,18 +324,18 @@ function saveConvoTurn(user, convoId, sid, userText, botOut){
 }
 
 /* ---- محادثات وليّ الأمر المحفوظة ---- */
-app.get('/api/convos', auth, requireRole('parent'), (req,res)=>{
+app.get('/api/convos', auth, (req,res)=>{
   const list = (db.DB.convos[req.user.id] || []).slice()
     .sort((a,b)=> b.upd - a.upd)
     .map(c=>({ id:c.id, title:c.title, sid:c.sid, upd:c.upd, count:c.msgs.length }));
   res.json({ convos:list });
 });
-app.get('/api/convos/:id', auth, requireRole('parent'), (req,res)=>{
+app.get('/api/convos/:id', auth, (req,res)=>{
   const c = (db.DB.convos[req.user.id] || []).find(x=>x.id===req.params.id);
   if(!c) return res.status(404).json({ error:'غير موجودة' });
   res.json({ convo:c });
 });
-app.delete('/api/convos/:id', auth, requireRole('parent'), (req,res)=>{
+app.delete('/api/convos/:id', auth, (req,res)=>{
   db.DB.convos[req.user.id] = (db.DB.convos[req.user.id] || []).filter(x=>x.id!==req.params.id);
   saveDB(); res.json({ ok:true });
 });
@@ -360,12 +388,12 @@ app.post('/api/chat/stream', auth, async (req,res)=>{
 /* ============================================================
    ROSTER — استيراد الإكسل مرّة واحدة + بحث فوري
    ============================================================ */
-app.get('/api/roster/stats', auth, (req,res)=>{
+app.get('/api/roster/stats', auth, requireRole('admin','teacher'), (req,res)=>{
   const r = db.DB.roster;
   res.json({ ready:roster.ready(), count:roster.count(),
     fileName:r && r.fileName, importedAt:r && r.importedAt, stats:roster.stats() });
 });
-app.get('/api/roster/search', auth, (req,res)=>{
+app.get('/api/roster/search', auth, requireRole('admin','teacher'), (req,res)=>{
   if(!roster.ready()) return res.json({ total:0, rows:[], ready:false });
   const { q = '', page = '1', per = '25' } = req.query;
   res.json({ ready:true, ...roster.search(String(q).trim(), +page || 1, Math.min(+per || 25, 100)) });
@@ -407,7 +435,7 @@ app.post('/api/roster/clear', auth, requireRole('admin'), (req,res)=>{
   // احذف بطاقة ملف السجل من مركز الملفات حتى لا تبقى إشارة لسجل ممسوح
   db.DB.files = db.DB.files.filter(f=>{
     const isRoster = f.subject === 'سجل الطلاب' || (src && f.name === src);
-    if(isRoster) rmUpload(f.path);
+    if(isRoster) dropFileBytes(f);
     return !isRoster;
   });
   db.saveNow();
@@ -481,12 +509,14 @@ app.post('/api/roster/import', auth, requireRole('admin'), upload.single('file')
     if(mode === 'replace'){
       db.DB.files = db.DB.files.filter(f=>{
         if(f.subject !== 'سجل الطلاب') return true;
-        rmUpload(f.path); return false;
+        dropFileBytes(f); return false;
       });
     }
-    db.DB.files.push({ id:'f'+Date.now(), owner:req.user.id, ownerName:req.user.name, subject:'سجل الطلاب',
-      name:origName, status:'approved', mime:req.file.mimetype, path:'uploads/'+req.file.filename,
-      content:`سجل طلاب مفهرس: ${out.count} طالب — تمت القراءة مرة واحدة عند الاستيراد.`, ts:Date.now() });
+    const card = { id:'f'+Date.now(), owner:req.user.id, ownerName:req.user.name, subject:'سجل الطلاب',
+      name:origName, origName, status:'approved', mime:req.file.mimetype, path:null, blob:true,
+      content:`سجل طلاب مفهرس: ${out.count} طالب — تمت القراءة مرة واحدة عند الاستيراد.`, ts:Date.now() };
+    card.size = await keepUpload(card.id, req.file);
+    db.DB.files.push(card);
     db.saveNow();
     res.json({ ok:true, ...out, mapping });
   }catch(e){
@@ -533,10 +563,11 @@ app.delete('/api/teachers/:id', auth, requireRole('admin'), (req,res)=>{
   db.DB.users = db.DB.users.filter(u=>u.id!==id);
   // تنظيف ما يخلّفه المعلم: ملفاته، محادثاته، إشعاراته، وجلساته
   const myFiles = db.DB.files.filter(f=>f.owner===id);
-  myFiles.forEach(f=> rmUpload(f.path));
+  myFiles.forEach(f=> dropFileBytes(f));
   db.DB.files = db.DB.files.filter(f=>f.owner!==id);
   Object.keys(db.DB.threads).forEach(k=>{ if(k.split('|').includes(id)) delete db.DB.threads[k]; });
   delete db.DB.notifs[id];
+  delete db.DB.convos[id];
   Object.entries(db.DB.tokens).forEach(([tok,uid])=>{ if(uid===id) delete db.DB.tokens[tok]; });
   db.saveNow();
   res.json({ ok:true, removedFiles:myFiles.length });
@@ -610,7 +641,7 @@ app.delete('/api/students/:id', auth, requireRole('admin'), (req,res)=>{
 /* ============================================================
    FILES  (upload / review / view)
    ============================================================ */
-app.get('/api/files', auth, (req,res)=>{
+app.get('/api/files', auth, requireRole('admin','teacher'), (req,res)=>{
   let list = db.DB.files;
   if(req.user.role==='teacher') list = list.filter(f=>f.owner===req.user.id);
   res.json({ files:list, subjects:SUBJECTS });
@@ -626,10 +657,9 @@ app.post('/api/files', auth, requireRole('teacher','admin'), requirePerm('files'
   const orig = req.file ? fixName(req.file.originalname) : '';
   let name = b.name || orig || 'ملف';
   let content = b.content || '';
-  let mime = 'text/plain', filePath = null;
+  let mime = 'text/plain';
   if(req.file){
     mime = req.file.mimetype || 'application/octet-stream';
-    filePath = 'uploads/' + req.file.filename;
     name = b.name || orig;
     // استخراج النص (نصوص + إكسل + PDF + Word) ليقرأه البوت
     // نستخدم اسم الملف الأصلي (فيه الامتداد) لا الاسم المعروض
@@ -639,7 +669,7 @@ app.post('/api/files', auth, requireRole('teacher','admin'), requirePerm('files'
   const f = {
     id:'f'+Date.now(), owner:req.user.id, ownerName:req.user.name, subject,
     name, status: (req.user.role==='admin' && isBrain) ? 'approved' : 'pending',
-    mime, path:filePath, content, ts:Date.now(),
+    mime, path:null, blob:!!req.file, origName:orig || null, content, ts:Date.now(),
     // وليّ الأمر لا يقرأ ملفاً إلا إذا أتاحه المدير له صراحةً (قد يحوي بيانات طلاب آخرين)
     forParents: req.user.role === 'admin' && b.forParents === '1',
   };
@@ -648,8 +678,16 @@ app.post('/api/files', auth, requireRole('teacher','admin'), requirePerm('files'
   // ملف المعلّم يُسجَّل عند قبوله، وإلا أمكن لمعلّم إضافة هوية وليّ أمر دون مراجعة.
   if(req.file && req.user.role === 'admin' && /\.xlsx$/i.test(orig)){
     f.autoIdentities = await autoIdentities(path.join(UPLOAD_DIR, req.file.filename), orig);
-    if(f.autoIdentities) db.saveNow();
   }
+  if(req.file){
+    try{ f.size = await keepUpload(f.id, req.file); }
+    catch(e){
+      db.DB.files = db.DB.files.filter(x => x.id !== f.id);
+      db.saveNow();
+      return res.status(500).json({ error:'تعذّر حفظ الملف — حاول مرة أخرى.' });
+    }
+  }
+  db.saveNow();
   if(req.user.role==='teacher'){
     const admin = db.DB.users.find(u=>u.role==='admin');
     if(admin) pushNotif(admin.id, 'ملف جديد من '+req.user.name, name+' — بانتظار مراجعتك');
@@ -667,8 +705,8 @@ app.put('/api/files/:id', auth, requireRole('admin'), async (req,res)=>{
   if(b.status && ['pending','approved','rejected'].includes(b.status)) f.status = b.status;
   if(b.forParents != null) f.forParents = b.forParents === true || b.forParents === '1';
   // قبول ملف إكسل من معلّم = الآن فقط تُسجَّل هوياته
-  if(f.status === 'approved' && prev !== 'approved' && !f.autoIdentities && /\.xlsx$/i.test(f.path || '')){
-    f.autoIdentities = await autoIdentities(path.join(__dirname, '..', 'public', f.path), f.name);
+  if(f.status === 'approved' && prev !== 'approved' && !f.autoIdentities && isXlsx(f)){
+    f.autoIdentities = await withFileOnDisk(f, p => autoIdentities(p, f.origName || f.name));
   }
   saveDB();
   if(f.owner!==req.user.id){
@@ -687,7 +725,7 @@ app.delete('/api/files/:id', auth, requireRole('admin'), (req,res)=>{
   const src = roster.sourceFile();
   const isRosterSource = f.subject === 'سجل الطلاب' || (src && f.name === src);
   db.DB.files.splice(i,1);
-  rmUpload(f.path);
+  dropFileBytes(f);
   let clearedRoster = 0;
   if(isRosterSource && roster.ready()){ clearedRoster = roster.count(); roster.clear(); }
   db.saveNow();
@@ -696,18 +734,27 @@ app.delete('/api/files/:id', auth, requireRole('admin'), (req,res)=>{
 });
 
 // عرض الملف داخل المتصفح (inline) بدون تنزيل
-app.get('/api/files/:id/raw', auth, (req,res)=>{
+app.get('/api/files/:id/raw', auth, requireRole('admin','teacher'), async (req,res)=>{
   const f = db.DB.files.find(x=>x.id===req.params.id);
   if(!f) return res.status(404).send('غير موجود');
   if(req.user.role==='teacher' && f.owner!==req.user.id) return res.status(403).send('ممنوع');
-  const isText = /text\/|json|csv/.test(f.mime||'') || /\.(txt|csv|md|json)$/i.test(f.name||'');
-  // الملفات النصية: نعرض المحتوى المخزَّن (قد يكون المدير عدّله) بدل نسخة القرص
-  if(f.path && !isText){
-    res.setHeader('Content-Disposition','inline');
-    return res.sendFile(path.join(__dirname,'..','public', f.path));
+  res.setHeader('X-Content-Type-Options', 'nosniff');
+  // يُعرض داخل الصفحة: صور وPDF فقط. غيرها (SVG/HTML...) قد يحمل سكربتاً يسرق الجلسة
+  const inlineOk = /^(image\/(png|jpe?g|gif|webp)|application\/pdf)$/i.test(f.mime || '');
+  if(inlineOk){
+    const b = f.blob ? await db.getBlob(f.id)
+      : (f.path && fs.existsSync(path.join(__dirname,'..','public', f.path)) ? { data: fs.readFileSync(path.join(__dirname,'..','public', f.path)) } : null);
+    if(!b){
+      res.setHeader('Content-Type','text/plain; charset=utf-8');
+      return res.status(410).send('الملف الأصلي غير متوفر على الخادم — أعد رفعه.');
+    }
+    res.setHeader('Content-Type', f.mime);
+    res.setHeader('Content-Disposition', 'inline');
+    return res.send(b.data);
   }
+  // باقي الأنواع: النص المقروء المخزَّن (وقد يكون المدير عدّله)
   res.setHeader('Content-Type','text/plain; charset=utf-8');
-  res.send(f.content || '(بدون محتوى)');
+  res.send(f.content || '(بدون محتوى نصي)');
 });
 
 /* ============================================================
@@ -800,7 +847,7 @@ app.post('/api/teachers/:id/password', auth, requireRole('admin'), (req,res)=>{
 
 /* إعادة تعيين كاملة: البيانات + السجل المفهرس + ملفات القرص (لا يبقى أثر متناقض) */
 app.post('/api/reset', auth, requireRole('admin'), (req,res)=>{
-  (db.DB.files||[]).forEach(f=> rmUpload(f.path));
+  (db.DB.files||[]).forEach(f=> dropFileBytes(f));
   roster.clear();
   resetDB();
   roster.clear();   // بعد البذرة الجديدة أيضاً
@@ -827,9 +874,10 @@ io.on('connection', (socket)=>{
     // نعيد قراءة الحساب في كل رسالة: قد يحذفه المدير أو يسحب صلاحية المراسلة
     const me = db.DB.users.find(u=>u.id===uid);
     if(!me) return socket.emit('chat:error', 'حسابك لم يعد موجوداً.');
+    if(me.role !== 'admin' && me.role !== 'teacher') return socket.emit('chat:error', 'المراسلة للإدارة والمعلمين فقط.');
     if(!hasPerm(me, 'messages')) return socket.emit('chat:error', 'صلاحية المراسلة غير مفعّلة لحسابك.');
-    const peer = db.DB.users.find(u=>u.id===to);
-    if(!peer) return socket.emit('chat:error', 'المستلم غير موجود — ربما حُذف حسابه.');
+    const peer = contactsFor(me).find(u=>u.id===to);
+    if(!peer) return socket.emit('chat:error', 'لا يمكنك مراسلة هذا الحساب.');
     const key = tkey(uid, to);
     db.DB.threads[key] = db.DB.threads[key] || [];
     const msg = { from:uid, text:String(text).slice(0,2000), ts:Date.now(), read:false };
@@ -844,6 +892,8 @@ io.on('connection', (socket)=>{
   try { await db.init(); }               // Mongo (دائم) أو ملف محلي
   catch(e){ console.error('فشل الاتصال بقاعدة البيانات:', e.message); process.exit(1); }
   const fixedN = repairNames();            // إصلاح أسماء الملفات العربية المخزَّنة مشوّهة
+  const repaired = await repairFiles();    // نصوص إكسل «[object Object]» + ملفات فُقد أصلها
+  if(repaired) console.log('فُحص وأُصلح ' + repaired + ' ملف');
   if(fixedN) console.log('أُصلح اسم '+fixedN+' ملف (ترميز عربي)');
   roster.hydrate();                        // إعادة بناء الفهرس من الحالة المحمّلة
   server.listen(PORT, ()=>{

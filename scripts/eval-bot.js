@@ -87,8 +87,13 @@ function judge(label, q, res, exp){
     await req('POST', '/api/roster/import', { token:A, form:fd });
 
     /* ---- الإدارة: محادثة واحدة متصلة (السياق مهم) ---- */
-    const S = { sessionId:'eval-admin' };
-    const admin = async (label, q, exp) => judge('إدارة — ' + label, q, await ask(A, { ...S, message:q }), exp);
+    // محادثة محفوظة واحدة للإدارة: الذاكرة تُبنى منها (كما لو تنقّل المدير بين الخانات ورجع)
+    let adminConvo = null;
+    const admin = async (label, q, exp) => {
+      const res = await ask(A, { convoId:adminConvo, message:q });
+      if(res.done && res.done.convoId) adminConvo = res.done.convoId;
+      judge('إدارة — ' + label, q, res, exp);
+    };
     await admin('أفضل/أضعف مادة لطالب = نص', 'وش افضل ماده واضعف ماده عند الطالب ST1005', { chart:false, top:false, report:false, student:'ST1005' });
     await admin('طلب ترتيب صريح', 'سوي لي رسم بياني لافضل الطلاب', { top:true });
     await admin('اعتراض على المرفق', 'انا ما قلت لك تسوي رسم', { chart:false, top:false, donut:false, report:false });
@@ -102,6 +107,12 @@ function judge(label, q, res, exp){
     await admin('بالاسم', 'وش مستوى مازن؟ بدون رسومات ابي كلام بس', { chart:false, donut:false, report:false, top:false, student:'ST1003' });
     await admin('إحصائية عامة', 'كم عدد الطلاب اللي معدلهم تحت 70؟', { chart:false, donut:false, report:false, top:false });
     await admin('تقرير', 'ابي تقرير كامل عن ST1010', { report:true, top:false, student:'ST1010' });
+
+    const saved = (await req('GET', '/api/convos/' + adminConvo, { token:A })).json;
+    total++;
+    const savedOk = saved && saved.convo && saved.convo.msgs.length >= 20;
+    if(savedOk) pass++;
+    rows.push(`${savedOk ? '✅' : '❌'} إدارة — المحادثة محفوظة كاملة (${saved && saved.convo ? saved.convo.msgs.length : 0} رسالة) وتُفتح بعد التنقّل`);
 
     /* ---- وليّ الأمر: محادثة محفوظة واحدة ---- */
     const PL = (await req('POST', '/api/login', { body:{ role:'parent', idType:'guardian', identifier:'1050000004' } })).json;

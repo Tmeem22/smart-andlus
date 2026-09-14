@@ -233,7 +233,6 @@ tr:last-child td{border-bottom:none}
 
 /* تخطيط المساعد مع سجل المحادثات */
 .ai-layout{flex:1;min-height:0;display:grid;grid-template-columns:250px minmax(0,1fr);gap:14px;width:100%;max-width:1100px;margin:0 auto}
-.ai-layout.no-side{grid-template-columns:1fr;max-width:900px}
 .convo-side{display:flex;flex-direction:column;gap:10px;min-height:0;background:var(--card);border:1px solid var(--line);border-radius:var(--radius);padding:12px}
 .convo-list{flex:1;overflow-y:auto;display:flex;flex-direction:column;gap:6px;min-height:0}
 .convo-item{display:flex;align-items:center;gap:6px;padding:9px 11px;border-radius:10px;cursor:pointer;background:var(--soft);transition:.12s}

@@ -454,7 +454,70 @@ async function waitUp(ms = 20000){
     const tForced = (await req('POST', '/api/files', { token:TID, form:tForce })).json.file;
     check('المعلّم لا يستطيع إتاحة ملف لأولياء الأمور', tForced && tForced.forParents === false, JSON.stringify(tForced && tForced.forParents));
 
-    /* ---------- 21. إعادة التعيين تمسح كل شيء ---------- */
+    /* ---------- 21. بيانات الطلاب والملفات ليست لوليّ الأمر ---------- */
+    const parentNow = (await req('POST', '/api/login', { body:{ role:'parent', idType:'guardian', identifier:gidT } })).json.token;
+    for(const [label, url] of [
+      ['البحث في سجل الطلاب (فيه هويات أولياء الأمور)', '/api/roster/search?q='],
+      ['إحصاءات السجل', '/api/roster/stats'],
+      ['قائمة ملفات المدرسة', '/api/files'],
+      ['فتح ملف مدرسي', '/api/files/' + pubUp.id + '/raw'],
+    ]){
+      const r = await req('GET', url, { token:parentNow });
+      check('وليّ الأمر ممنوع من ' + label, r.status === 403, 'status ' + r.status);
+    }
+    check('المحادثات المحفوظة متاحة للمدير', (await req('GET', '/api/convos', { token:A3 })).status === 200);
+    check('المحادثات المحفوظة متاحة للمعلّم', (await req('GET', '/api/convos', { token:TID })).status === 200);
+
+    /* وليّ الأمر لا يراسل أحداً عبر السوكت */
+    const { io: ioc } = require('socket.io-client');
+    const sock = ioc(BASE, { auth:{ token:parentNow }, transports:['websocket'] });
+    const sockErr = await new Promise(resolve => {
+      const t = setTimeout(() => resolve('timeout'), 5000);
+      sock.on('connect', () => sock.emit('chat:message', { to:'admin1', text:'رسالة اختبار من وليّ أمر' }));
+      sock.on('chat:error', e => { clearTimeout(t); resolve(e); });
+    });
+    sock.close();
+    check('وليّ الأمر لا يستطيع مراسلة حسابات المنصة', sockErr !== 'timeout', String(sockErr));
+    const adminThreads = (await req('GET', '/api/threads', { token:A3 })).json.threads;
+    check('رسالة وليّ الأمر لم تصل للمدير', !adminThreads.some(t => t.last && /رسالة اختبار من وليّ أمر/.test(t.last.text)));
+
+    /* ---------- 22. الملف يُحفظ دائماً ويُعرض بأمان ---------- */
+    const pubDir = path.join(__dirname, '..', 'public', 'uploads');
+    const before22 = new Set(fs.existsSync(pubDir) ? fs.readdirSync(pubDir) : []);
+    const pdfBytes = Buffer.from('%PDF-1.4\n% audit\n1 0 obj<<>>endobj\ntrailer<<>>\n%%EOF');
+    const pf = new FormData(); pf.append('brain', '1'); pf.append('name', 'ملف PDF');
+    pf.append('file', new Blob([pdfBytes], { type:'application/pdf' }), 'test.pdf');
+    const pUp = (await req('POST', '/api/files', { token:A3, form:pf })).json.file;
+    check('الملف محفوظ في التخزين الدائم لا في مجلد عام', pUp.blob === true && !pUp.path, JSON.stringify({ blob:pUp.blob, path:pUp.path }));
+    const rawRes = await fetch(BASE + '/api/files/' + pUp.id + '/raw', { headers:{ Authorization:'Bearer ' + A3 } });
+    const rawBuf = Buffer.from(await rawRes.arrayBuffer());
+    check('فتح الملف يعيد محتواه الأصلي بالضبط', rawRes.status === 200 && rawBuf.equals(pdfBytes), 'status ' + rawRes.status + ' bytes ' + rawBuf.length);
+    const after22 = fs.existsSync(pubDir) ? fs.readdirSync(pubDir).filter(n => !before22.has(n)) : [];
+    check('لا تُكتب نسخة من الملف في مجلد public', after22.length === 0, after22.join(','));
+    const svg = new FormData(); svg.append('brain', '1'); svg.append('name', 'صورة SVG');
+    svg.append('file', new Blob(['<svg xmlns="http://www.w3.org/2000/svg" onload="alert(1)"/>'], { type:'image/svg+xml' }), 'x.svg');
+    const sUp = (await req('POST', '/api/files', { token:A3, form:svg })).json.file;
+    const sRaw = await fetch(BASE + '/api/files/' + sUp.id + '/raw', { headers:{ Authorization:'Bearer ' + A3 } });
+    check('ملف SVG لا يُعرض كصفحة (يمنع سرقة الجلسة بسكربت)', !/svg|html/i.test(sRaw.headers.get('content-type') || ''), sRaw.headers.get('content-type'));
+    const delP = await req('DELETE', '/api/files/' + pUp.id, { token:A3 });
+    const rawGone = await fetch(BASE + '/api/files/' + pUp.id + '/raw', { headers:{ Authorization:'Bearer ' + A3 } });
+    check('حذف الملف يحذف محتواه المحفوظ', delP.status === 200 && rawGone.status === 404, 'status ' + rawGone.status);
+
+    /* ---------- 23. قراءة إكسل فيه معادلات ونص منسّق وترويسة ليست في السطر الأول ---------- */
+    const ExcelJSx = require('exceljs');
+    const xw = new ExcelJSx.Workbook(); const xs = xw.addWorksheet('ورقة1');
+    xs.getCell('A1').value = 'كشف درجات';
+    xs.getRow(3).values = ['اسم الطالب', 'واجبات', 'المجموع'];
+    xs.getCell('A4').value = { richText:[{ text:'ريم ' }, { text:'الاختبار' }] }; xs.getCell('B4').value = 18; xs.getCell('C4').value = { formula:'B4*2', result:36 };
+    xs.getCell('A5').value = 'سعد الاختبار'; xs.getCell('B5').value = 12; xs.getCell('C5').value = { formula:'B5*2', result:24 };
+    const xf = path.join(TMP, 'formulas.xlsx'); await xw.xlsx.writeFile(xf);
+    const xt = await require('../server/extract').extractText(xf, 'formulas.xlsx', '');
+    check('إكسل بمعادلات: لا «[object Object]»', !/\[object Object\]/.test(xt), xt.slice(0, 160));
+    check('إكسل: النص المنسّق وناتج المعادلة يُقرآن', /ريم الاختبار \| 18 \| 36/.test(xt), xt.slice(0, 300));
+    check('إكسل: الترويسة تُكتشف ولو لم تكن في السطر الأول', /الأعمدة: اسم الطالب \| واجبات \| المجموع/.test(xt));
+    check('إكسل: «الأعلى» محسوب على كل الصفوف', /الأعلى: ريم الاختبار \(36\)، سعد الاختبار \(24\)/.test(xt), xt.slice(0, 400));
+
+    /* ---------- 24. إعادة التعيين تمسح كل شيء ---------- */
     await req('POST', '/api/roster/import', { token:A, form:(()=>{ const f=new FormData();
       f.append('file', new Blob([fs.readFileSync(ROSTER)]), 'سجل-اختبار.xlsx'); f.append('mode','replace'); return f; })() });
     await req('POST', '/api/reset', { token:A });

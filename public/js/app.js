@@ -285,9 +285,19 @@ function connectSocket(){
    PARENT — chat
    ============================================================ */
 let CONVOS = [], activeConvo = null;
-/* ذاكرة شات الإدارة/المعلّم: جلسة جديدة لكل فتح لصفحة المساعد */
-let SCHOOL_SESSION = null;
-const newSessionId = () => 's' + Date.now().toString(36) + Math.random().toString(16).slice(2, 8);
+let SCHOOL_RST = null;   // حالة السجل لتحية الإدارة/المعلّم
+let PENDING = null;      // سؤال ما زال يُجاب — يُعاد عرضه لو تنقّل المستخدم بين الخانات ورجع
+
+/* المحادثة المفتوحة تبقى مفتوحة: بين الخانات وبعد إعادة تحميل الصفحة */
+const convoKey = () => 'andlus_convo_' + (ME && ME.id);
+function rememberConvo(id){
+  activeConvo = id || null;
+  try{ id ? localStorage.setItem(convoKey(), id) : localStorage.removeItem(convoKey()); }catch(_){}
+}
+function recallConvo(){
+  if(activeConvo) return activeConvo;
+  try{ return localStorage.getItem(convoKey()); }catch(_){ return null; }
+}
 
 /* بناء الأدوات البصرية من نتيجة (حيّة أو محفوظة) */
 function toolsHtml(r){
@@ -299,10 +309,10 @@ function toolsHtml(r){
   if(r.top && r.topData) extra += topChart(r.topData);
   return extra;
 }
-function greetingChips(){
-  const st = el('stream');
+function suggestions(list){
+  const st = el('stream'); if(!st) return;
   const wrap = document.createElement('div'); wrap.className = 'suggest';
-  ['📊 رسم بياني للدرجات','📄 تقرير كامل','✅ نسبة الحضور','⭐ أفضل وأضعف مادة'].forEach(txt=>{
+  list.forEach(txt=>{
     const b = document.createElement('button'); b.textContent = txt;
     b.onclick = () => { el('chatIn').value = txt.replace(/^[^ ]+ /,''); sendChat(); };
     wrap.appendChild(b);
@@ -312,33 +322,32 @@ function greetingChips(){
 
 async function renderChat(v){
   const school = ME.role !== 'parent';
-  let children = [], cur = null, rst = null;
+  let children = [];
   if(school){
-    rst = await api('/api/roster/stats');
+    SCHOOL_RST = await api('/api/roster/stats');
   } else {
     ({ children } = await api('/api/children'));
     if(!children.length){ v.innerHTML = emptyBox('لا يوجد أبناء مسجّلون.'); return; }
     activeChild = activeChild && children.some(c=>c.id===activeChild) ? activeChild : children[0].id;
-    cur = children.find(c=>c.id===activeChild);
   }
   const rightCtrl = school
-    ? `<span class="chip">${rst.ready ? '🧠 محفوظ: '+rst.count+' طالب' : '⚠️ لم يُستورد سجل بعد'}</span>`
+    ? `<span class="chip">${SCHOOL_RST.ready ? '🧠 محفوظ: '+SCHOOL_RST.count+' طالب' : '⚠️ لم يُستورد سجل بعد'}</span>`
     : `<div class="field" style="margin:0"><select id="childSel" style="min-width:170px">
         ${children.map(k=>`<option value="${k.id}" ${k.id===activeChild?'selected':''}>${esc(k.name)} — ${esc(k.classNo)}</option>`).join('')}
        </select></div>`;
   v.innerHTML = `
-    <div class="ai-layout ${school?'no-side':''}">
-      ${school ? '' : `<aside class="convo-side" id="convoSide">
+    <div class="ai-layout">
+      <aside class="convo-side" id="convoSide">
         <button class="btn block" id="newChatBtn">＋ محادثة جديدة</button>
         <div class="convo-list" id="convoList"></div>
       </aside>
-      <div class="convo-scrim" id="convoScrim"></div>`}
+      <div class="convo-scrim" id="convoScrim"></div>
       <div class="chat-wrap">
         <div class="flex between center mb wrap gap">
           <div class="flex center gap">
-            ${school ? '' : `<button class="icon-btn convo-btn" id="convoToggle" title="المحادثات"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M3 6h18M3 12h18M3 18h18"/></svg></button>`}
+            <button class="icon-btn convo-btn" id="convoToggle" title="المحادثات"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M3 6h18M3 12h18M3 18h18"/></svg></button>
             <div><h2 style="margin:0;font-size:19px">المساعد الذكي 🤖</h2>
-              <p class="muted small" style="margin:2px 0 0">${school?'اسأل عن أي طالب في السجل':'اسأل عن مستوى ابنك واطلب رسم أو تقرير'}</p></div>
+              <p class="muted small" style="margin:2px 0 0">${school?'اسأل عن أي طالب في السجل — محادثاتك تُحفظ':'اسأل عن مستوى ابنك واطلب رسم أو تقرير'}</p></div>
           </div>
           ${rightCtrl}
         </div>
@@ -351,34 +360,20 @@ async function renderChat(v){
     </div>`;
   el('sendBtn').onclick = sendChat;
   el('chatIn').addEventListener('keydown', e => { if(e.key === 'Enter') sendChat(); });
-
-  if(school){
-    activeChild = null; activeConvo = null; SCHOOL_SESSION = newSessionId();
-    const st = el('stream'); st.innerHTML = '';
-    botSay(rst.ready
-      ? `أهلاً 👋 حفظت سجل <b>${rst.count} طالب</b> — اسألني عن أي طالب أو إحصائية وأجيب فوراً.`
-      : `أهلاً 👋 لم يُستورد سجل الطلاب بعد. افتح <b>سجل الطلاب</b> واستورد ملف الإكسل.`);
-    // اقتراحات لا تُعرض إلا إذا كانت البيانات موجودة فعلاً (لا نعد بما لا يقدر عليه)
-    if(rst.ready){
-      const w = document.createElement('div'); w.className='suggest';
-      ['👥 كم عدد الطلاب؟','🏆 أفضل 10 طلاب','📊 متوسط كل مادة'].forEach(t=>{ const b=document.createElement('button');b.textContent=t;b.onclick=()=>{el('chatIn').value=t.replace(/^[^ ]+ /,'');sendChat();};w.appendChild(b); });
-      st.appendChild(w);
-    } else if(ME.role === 'admin'){
-      const w = document.createElement('div'); w.className='suggest';
-      const b = document.createElement('button'); b.textContent = '📥 اذهب إلى سجل الطلاب';
-      b.onclick = () => go('roster'); w.appendChild(b); st.appendChild(w);
-    }
-    return;
-  }
-
-  // وليّ الأمر: قائمة المحادثات + استئناف
-  el('childSel').onchange = e => { activeChild = e.target.value; newChat(); };
+  if(!school) el('childSel').onchange = e => { activeChild = e.target.value; newChat(); };
   el('newChatBtn').onclick = () => newChat();
   el('convoToggle').onclick = () => { el('convoSide').classList.toggle('open'); el('convoScrim').classList.toggle('show'); };
   el('convoScrim').onclick = () => { el('convoSide').classList.remove('open'); el('convoScrim').classList.remove('show'); };
+
   await loadConvos();
-  if(activeConvo && CONVOS.some(c=>c.id===activeConvo)) await openConvo(activeConvo);
+  const want = recallConvo();
+  const found = want && CONVOS.find(c => c.id === want);
+  // محادثة وليّ الأمر تخصّ ابناً بعينه — لا نفتحها تحت ابن آخر
+  if(found && (school || !found.sid || found.sid === activeChild)) await openConvo(want);
   else newChat();
+
+  // سؤال ما زال قيد الإجابة (تنقّل المستخدم أثناءه): نعرضه بانتظار الرد
+  if(PENDING && PENDING.convoId === activeConvo){ meSay(PENDING.q); PENDING.bubble = typingBubble(); }
 }
 
 async function loadConvos(){
@@ -396,22 +391,40 @@ function renderConvoList(){
     </div>`).join('');
 }
 function newChat(){
-  activeConvo = null;
+  rememberConvo(null);
   const st = el('stream'); if(!st) return; st.innerHTML = '';
-  const cur = (document.getElementById('childSel')||{}).selectedOptions ? document.getElementById('childSel').selectedOptions[0].textContent : '';
-  botSay(`أهلاً بك 👋 أنا مساعد <b>ذكاء الأندلس</b>. اسألني عن <b>${esc((cur||'').split('—')[0].trim())}</b>: الدرجات، الحضور، أو اطلب رسم/تقرير.`);
-  greetingChips();
+  if(ME.role === 'parent'){
+    const sel = document.getElementById('childSel');
+    const cur = sel && sel.selectedOptions && sel.selectedOptions[0] ? sel.selectedOptions[0].textContent : '';
+    botSay(`أهلاً بك 👋 أنا مساعد <b>ذكاء الأندلس</b>. اسألني عن <b>${esc((cur||'').split('—')[0].trim())}</b>: الدرجات، الحضور، أو اطلب رسم/تقرير.`);
+    suggestions(['📊 رسم بياني للدرجات','📄 تقرير كامل','✅ نسبة الحضور','⭐ أفضل وأضعف مادة']);
+  } else {
+    const rst = SCHOOL_RST || {};
+    botSay(rst.ready
+      ? `أهلاً 👋 السجل فيه <b>${rst.count} طالب</b> — اسألني عن أي طالب أو إحصائية أو ملف.`
+      : `أهلاً 👋 لم يُستورد سجل الطلاب بعد. افتح <b>سجل الطلاب</b> واستورد ملف الإكسل.`);
+    // اقتراحات لا تُعرض إلا إذا كانت البيانات موجودة فعلاً
+    if(rst.ready) suggestions(['👥 كم عدد الطلاب؟','🏆 أفضل 10 طلاب','📊 متوسط كل مادة']);
+    else if(ME.role === 'admin'){
+      const w = document.createElement('div'); w.className = 'suggest';
+      const b = document.createElement('button'); b.textContent = '📥 اذهب إلى سجل الطلاب';
+      b.onclick = () => go('roster'); w.appendChild(b); st.appendChild(w);
+    }
+  }
   renderConvoList();
   el('convoSide') && el('convoSide').classList.remove('open');
   el('convoScrim') && el('convoScrim').classList.remove('show');
 }
 async function openConvo(id){
   let convo;
-  try{ ({ convo } = await api('/api/convos/'+id)); }catch(e){ toast('تعذّر فتح المحادثة'); return; }
-  activeConvo = id;
-  if(convo.sid) activeChild = convo.sid;
-  const sel = el('childSel'); if(sel && convo.sid) sel.value = convo.sid;
-  const st = el('stream'); st.innerHTML = '';
+  try{ ({ convo } = await api('/api/convos/'+id)); }
+  catch(e){ rememberConvo(null); toast('تعذّر فتح المحادثة'); newChat(); return; }
+  rememberConvo(id);
+  if(ME.role === 'parent' && convo.sid){
+    activeChild = convo.sid;
+    const sel = el('childSel'); if(sel) sel.value = convo.sid;
+  }
+  const st = el('stream'); if(!st) return; st.innerHTML = '';
   convo.msgs.forEach(m=>{ if(m.role==='user') meSay(m.text); else botSay(fmt(m.text||'') + toolsHtml(m)); });
   renderConvoList();
   el('convoSide') && el('convoSide').classList.remove('open');
@@ -419,9 +432,9 @@ async function openConvo(id){
   st.scrollTop = st.scrollHeight;
 }
 function afterConvo(r){
-  if(!r || !r.convoId || ME.role !== 'parent') return;
+  if(!r || !r.convoId) return;
   const isNew = activeConvo !== r.convoId;
-  activeConvo = r.convoId;
+  rememberConvo(r.convoId);
   loadConvos();                          // حدّث القائمة فوراً
   if(isNew) setTimeout(loadConvos, 3500); // التقط عنوان الـAI المولّد لاحقاً
 }
@@ -429,7 +442,7 @@ async function delConvo(id){
   if(!confirm('حذف هذه المحادثة؟')) return;
   try{ await api('/api/convos/'+id, { method:'DELETE' }); }catch(e){}
   CONVOS = CONVOS.filter(c=>c.id!==id);
-  if(activeConvo===id){ activeConvo=null; newChat(); } else renderConvoList();
+  if(activeConvo===id) newChat(); else renderConvoList();
 }
 
 /* ============================================================
@@ -611,12 +624,13 @@ async function sendChat(){
   const inp = el('chatIn'); const q = inp.value.trim(); if(!q) return;
   inp.value = ''; meSay(q);
   const b = typingBubble();
+  PENDING = { q, convoId:activeConvo };
   let full = '', started = false, final = null, failed = null;
   try{
     const res = await fetch('/api/chat/stream', {
       method:'POST',
       headers:{ 'Content-Type':'application/json', 'Authorization':'Bearer '+TOKEN },
-      body: JSON.stringify({ studentId:activeChild, message:q, convoId:activeConvo, sessionId:SCHOOL_SESSION }),
+      body: JSON.stringify({ studentId:activeChild, message:q, convoId:activeConvo }),
     });
     if(!res.ok || !res.body) throw new Error('HTTP '+res.status);
     const reader = res.body.getReader(); const dec = new TextDecoder(); let buf = '';
@@ -655,14 +669,18 @@ async function sendChat(){
     if(r.top && r.topData) extra += topChart(r.topData);
     fill(b, fmt(r.text || cleanLive(full)) + extra);
     afterConvo(r);
+    const away = !document.body.contains(b);   // تنقّل ورجع أثناء الرد: الفقاعة الأصلية لم تعد معروضة
+    PENDING = null;
+    if(away && CUR === 'chat' && r.convoId) openConvo(r.convoId);
   };
   if(final){ renderResult(final); return; }
 
   // احتياط: طلب غير متدفّق — للمتصفحات التي لا تدعم البثّ
   try{
-    const r = await api('/api/chat', { method:'POST', body:{ studentId:activeChild, message:q, convoId:activeConvo, sessionId:SCHOOL_SESSION } });
+    const r = await api('/api/chat', { method:'POST', body:{ studentId:activeChild, message:q, convoId:activeConvo } });
     renderResult(r); return;
   }catch(e2){
+    PENDING = null;
     // لا ردود «مصطنعة» بكلمات محفوظة — إن تعذّر الذكاء نقولها بوضوح
     fill(b, `<p style="margin:0 0 8px">⚠️ تعذّر الوصول إلى المساعد الذكي الآن.</p>
       <p class="small muted" style="margin:0 0 10px">${esc((failed && failed.error) || e2.message || '')}</p>
@@ -800,6 +818,7 @@ async function renderTeacherFiles(v){
 function fileRow(f){
   const label = { pending:'قيد المراجعة', approved:'مقبول', rejected:'مرفوض' }[f.status];
   return `<div class="card card-pad flex center gap wrap"><div class="file-pill" style="flex:1;border:none;padding:0"><div class="fi">${I.files}</div><div class="meta"><b>${esc(f.name)}</b><span>${esc(f.subject)} · ${esc(f.ownerName)} · ${new Date(f.ts).toLocaleDateString('ar-SA')}</span></div></div>
+    ${f.needsReupload ? `<span class="tag rejected" title="فُقد الملف الأصلي من الخادم قبل تحديث التخزين">أعد رفعه</span>` : ''}
     <span class="tag ${f.status}">${label}</span><button class="btn ghost sm" onclick="viewFile('${f.id}')">فتح</button></div>`;
 }
 function openUpload(){
@@ -830,6 +849,7 @@ async function viewFile(id){
   if(f.path && /image\//.test(f.mime)) viewer = `<div class="file-view"><img src="/api/files/${f.id}/raw?t=${TOKEN}" alt="${esc(f.name)}"></div>`;
   else if(f.path && /pdf/.test(f.mime)) viewer = `<div class="file-view" style="max-height:420px"><iframe src="/api/files/${f.id}/raw?t=${TOKEN}" style="height:400px"></iframe></div>`;
   else viewer = `<div class="file-view">${esc(f.content || '(بدون محتوى نصي — ملف مرفق)')}</div>`;
+  if(f.needsReupload) viewer = `<p class="small" style="color:#c0392b;margin:0 0 8px">⚠️ الملف الأصلي فُقد من الخادم قبل تحديث التخزين، ولا يستطيع البوت قراءته. احذفه وأعد رفعه — الملفات الجديدة تُحفظ بشكل دائم.</p>` + viewer;
   const body = `<div class="file-pill mb"><div class="fi">${I.files}</div><div class="meta"><b>${esc(f.name)}</b><span>${esc(f.subject)} · ${esc(f.ownerName)}</span></div><span class="tag ${f.status}">${label}</span></div>${viewer}`;
   let btns = [{ t:'إغلاق', cls:'btn ghost', fn:closeModal }];
   if(ME.role === 'admin'){
