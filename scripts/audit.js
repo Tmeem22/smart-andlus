@@ -517,7 +517,134 @@ async function waitUp(ms = 20000){
     check('إكسل: الترويسة تُكتشف ولو لم تكن في السطر الأول', /الأعمدة: اسم الطالب \| واجبات \| المجموع/.test(xt));
     check('إكسل: «الأعلى» محسوب على كل الصفوف', /الأعلى: ريم الاختبار \(36\)، سعد الاختبار \(24\)/.test(xt), xt.slice(0, 400));
 
-    /* ---------- 24. إعادة التعيين تمسح كل شيء ---------- */
+    /* ---------- 24. تسجيل الدخول: أخطاء متوقّعة ---------- */
+    check('كلمة مرور خاطئة تُرفض',
+      (await req('POST', '/api/login', { body:{ role:'admin', user:'naif', pass:'خطأ' } })).status === 401);
+    check('بيانات صحيحة بدور خاطئ تُرفض (معلّم يدخل كمدير)',
+      (await req('POST', '/api/login', { body:{ role:'admin', user:'tid', pass:'audit-pass-2026' } })).status === 401);
+    check('وليّ أمر بلا رقم يُرفض',
+      (await req('POST', '/api/login', { body:{ role:'parent', idType:'student', identifier:'   ' } })).status >= 400);
+
+    /* ---------- 25. المعلمون: إضافة وتعديل وتعارض ---------- */
+    const tNew = await req('POST', '/api/teachers', { token:A3, body:{ name:'معلم تعديل', user:'tedit', subject:'العلوم', pass:'audit-pass-2026', perms:['files'] } });
+    check('إضافة معلم', tNew.status === 200 && tNew.json.teacher.subject === 'العلوم', 'status ' + tNew.status);
+    check('اسم دخول مكرّر يُرفض', (await req('POST', '/api/teachers', { token:A3, body:{ name:'مكرر', user:'tedit', pass:'audit-pass-2026' } })).status === 409);
+    const tUpd = await req('PUT', '/api/teachers/' + tNew.json.teacher.id, { token:A3, body:{ subject:'اللغة العربية', perms:['files','messages'] } });
+    check('تعديل مادة وصلاحيات معلم', tUpd.status === 200 && tUpd.json.teacher.subject === 'اللغة العربية' && tUpd.json.teacher.perms.includes('messages'));
+    const TE = (await req('POST', '/api/login', { body:{ role:'teacher', user:'tedit', pass:'audit-pass-2026' } })).json.token;
+    const meTE = (await req('GET', '/api/me', { token:TE })).json.me;
+    check('الصلاحيات الجديدة تصل لحساب المعلم', meTE.perms.includes('messages') && meTE.subject === 'اللغة العربية', JSON.stringify(meTE.perms));
+    check('كلمة مرور المعلم لا تُرسل للواجهة أبداً', !('pass' in meTE) && !(await req('GET', '/api/teachers', { token:A3 })).json.teachers.some(t => 'pass' in t));
+
+    /* ---------- 26. طلاب مُضافون يدوياً ---------- */
+    const sNew = await req('POST', '/api/students', { token:A3, body:{ name:'طالب يدوي', grade:'الثالث متوسط', classNo:'3/أ', attendance:0, grades:{ 'الرياضيات':88 } } });
+    check('إضافة طالب يدوياً', sNew.status === 200, 'status ' + sNew.status);
+    check('حضور «0» يبقى 0 لا رقماً مخترعاً', sNew.json.student.attendance === 0, String(sNew.json.student.attendance));
+    const manualId = sNew.json.student.id;
+    const allS = (await req('GET', '/api/students', { token:A3 })).json;
+    check('الطالب اليدوي يظهر في «الطلاب» بمصدره', allS.students.some(s => s.id === manualId && s.source === 'manual'));
+    const sEd = await req('PUT', '/api/students/' + manualId, { token:A3, body:{ name:'طالب يدوي معدّل', attendance:91 } });
+    check('تعديل طالب يدوي', sEd.status === 200 && sEd.json.student.name === 'طالب يدوي معدّل' && sEd.json.student.attendance === 91);
+    check('وليّ الأمر يدخل برقم طالب يدوي',
+      (await req('POST', '/api/login', { body:{ role:'parent', idType:'student', identifier:manualId } })).status === 200);
+    check('حذف طالب يدوي', (await req('DELETE', '/api/students/' + manualId, { token:A3 })).status === 200);
+    check('بعد الحذف لا دخول برقمه',
+      (await req('POST', '/api/login', { body:{ role:'parent', idType:'student', identifier:manualId } })).status === 401);
+
+    /* ---------- 27. دمج: ملف هويات ثم ملف درجات لنفس الطلاب ---------- */
+    const idF = new FormData(); idF.append('file', new Blob([fs.readFileSync(IDS_ONLY)]), 'هويات.xlsx'); idF.append('mode', 'replace');
+    const idImp = await req('POST', '/api/roster/import', { token:A3, form:idF });
+    check('استيراد ملف هويات فقط', idImp.status === 200 && idImp.json.count === 5, JSON.stringify(idImp.json && idImp.json.count));
+    const ExcelJSm = require('exceljs');
+    const gw = new ExcelJSm.Workbook(); const gs = gw.addWorksheet('درجات');
+    gs.columns = ['رقم الطالب', 'الرياضيات', 'العلوم'].map(h => ({ header:h, key:h }));
+    for(let i = 1; i <= 5; i++) gs.addRow({ 'رقم الطالب':'HD' + (2000 + i), 'الرياضيات':70 + i, 'العلوم':80 + i });
+    const gradesFile = path.join(TMP, 'درجات.xlsx'); await gw.xlsx.writeFile(gradesFile);
+    const gF = new FormData(); gF.append('file', new Blob([fs.readFileSync(gradesFile)]), 'درجات.xlsx'); gF.append('mode', 'merge');
+    const gImp = await req('POST', '/api/roster/import', { token:A3, form:gF });
+    check('دمج ملف درجات لا يكرّر الطلاب', gImp.status === 200 && gImp.json.count === 5, JSON.stringify(gImp.json && gImp.json.count));
+    const merged = (await req('GET', '/api/roster/search?q=HD2003', { token:A3 })).json.rows[0] || {};
+    check('الدمج يجمع الهوية والدرجات في سجل واحد',
+      merged.guardianId === '1060000003' && merged.grades && merged.grades['الرياضيات'] === 73 && merged.grades['العلوم'] === 83, JSON.stringify(merged).slice(0, 160));
+
+    /* ---------- 28. نموذج ملف الهويات ---------- */
+    const tplRes = await fetch(BASE + '/api/roster/template', { headers:{ Authorization:'Bearer ' + A3 } });
+    const tplBuf = Buffer.from(await tplRes.arrayBuffer());
+    let tplHeaders = [];
+    try{ const tw = new ExcelJSm.Workbook(); await tw.xlsx.load(tplBuf); tw.worksheets[0].getRow(1).eachCell(c => tplHeaders.push(String(c.value))); }catch(_){}
+    check('نموذج الهويات ملف إكسل صالح بالأعمدة الصحيحة',
+      tplRes.status === 200 && tplHeaders.includes('رقم الطالب') && tplHeaders.includes('هوية ولي الأمر'), tplHeaders.join('|'));
+    check('نموذج الهويات للمدير فقط',
+      (await req('GET', '/api/roster/template', { token:TE })).status === 403);
+
+    /* ---------- 29. المراسلة الفورية بين المدير والمعلّم ---------- */
+    const { io: ioc2 } = require('socket.io-client');
+    const connect = token => new Promise((resolve, reject) => {
+      const s = ioc2(BASE, { auth:{ token }, transports:['websocket'] });
+      s.on('connect', () => resolve(s)); s.on('connect_error', reject);
+      setTimeout(() => reject(new Error('socket timeout')), 5000);
+    });
+    const sockAdmin = await connect(A3), sockTeacher = await connect(TE);
+    const teacherGot = new Promise(resolve => { sockTeacher.on('chat:message', m => { if(!m.self) resolve(m); }); setTimeout(() => resolve(null), 5000); });
+    const teacherNotif = new Promise(resolve => { sockTeacher.on('notif', n => resolve(n)); setTimeout(() => resolve(null), 5000); });
+    const teTeacherId = tNew.json.teacher.id;
+    sockAdmin.emit('chat:message', { to:teTeacherId, text:'اجتماع المعلمين غداً' });
+    const gotMsg = await teacherGot, gotNotif = await teacherNotif;
+    check('المعلّم يستلم رسالة المدير فوراً', gotMsg && gotMsg.text === 'اجتماع المعلمين غداً', JSON.stringify(gotMsg));
+    check('المعلّم يصله إشعار بالرسالة', !!gotNotif, JSON.stringify(gotNotif));
+    const tThreads = (await req('GET', '/api/threads', { token:TE })).json.threads;
+    const adminThread = tThreads.find(t => t.peer === 'admin1');
+    check('المحادثة محفوظة وغير مقروءة عند المعلّم', adminThread && adminThread.unread === 1, JSON.stringify(adminThread));
+    await req('GET', '/api/thread/admin1', { token:TE });
+    const tThreads2 = (await req('GET', '/api/threads', { token:TE })).json.threads;
+    check('فتح المحادثة يجعلها مقروءة', (tThreads2.find(t => t.peer === 'admin1') || {}).unread === 0);
+    const adminGot = new Promise(resolve => { sockAdmin.on('chat:message', m => { if(!m.self) resolve(m); }); setTimeout(() => resolve(null), 5000); });
+    sockTeacher.emit('chat:message', { to:'admin1', text:'تم، سأحضر' });
+    check('المدير يستلم رد المعلّم', ((await adminGot) || {}).text === 'تم، سأحضر');
+    sockAdmin.close(); sockTeacher.close();
+    const nList = (await req('GET', '/api/notifs', { token:TE })).json.notifs;
+    check('قائمة الإشعارات فيها الرسالة', nList.some(n => /رسالة جديدة/.test(n.text)));
+    await req('POST', '/api/notifs/read', { token:TE });
+    check('تعليم الإشعارات مقروءة', (await req('GET', '/api/notifs', { token:TE })).json.notifs.every(n => n.read));
+    await req('POST', '/api/notifs/clear', { token:TE });
+    check('مسح الإشعارات', (await req('GET', '/api/notifs', { token:TE })).json.notifs.length === 0);
+    check('مسح كل المحادثات للمدير فقط', (await req('POST', '/api/messages/clear', { token:TE })).status === 403);
+    await req('POST', '/api/messages/clear', { token:A3 });
+    check('المدير يمسح كل المحادثات', (await req('GET', '/api/threads', { token:A3 })).json.threads.length === 0);
+
+    /* ---------- 30. مراجعة ملف معلّم: تعديل ورفض مع إشعاره ---------- */
+    const rv = new FormData(); rv.append('name', 'خطة الوحدة'); rv.append('content', 'مسودة أولى');
+    const rvUp = (await req('POST', '/api/files', { token:TE, form:rv })).json.file;
+    check('ملف المعلّم يبدأ «قيد المراجعة»', rvUp.status === 'pending');
+    await req('PUT', '/api/files/' + rvUp.id, { token:A3, body:{ content:'مسودة معدّلة من المدير' } });
+    const edited = (await req('GET', '/api/files', { token:TE })).json.files.find(f => f.id === rvUp.id);
+    check('تعديل المدير يظهر للمعلّم', edited && edited.content === 'مسودة معدّلة من المدير');
+    await req('PUT', '/api/files/' + rvUp.id, { token:A3, body:{ status:'rejected' } });
+    const tn = (await req('GET', '/api/notifs', { token:TE })).json.notifs.map(n => n.text);
+    check('المعلّم يُشعَر بالتعديل والرفض', tn.some(t => /عدّل المدير/.test(t)) && tn.some(t => /رفض/.test(t)), JSON.stringify(tn));
+    check('الملف المرفوض لا يصل عقل البوت', !(await req('GET', '/api/brain', { token:A3 })).json.files.some(f => f.id === rvUp.id));
+    const rawT = await fetch(BASE + '/api/files/' + rvUp.id + '/raw', { headers:{ Authorization:'Bearer ' + A3 } });
+    check('عرض ملف نصي يعيد النص المعدّل', rawT.status === 200 && (await rawT.text()) === 'مسودة معدّلة من المدير');
+
+    /* ---------- 31. محادثة محفوظة لا تُفتح لغير صاحبها ---------- */
+    check('فتح محادثة غير موجودة/لغيرك = 404', (await req('GET', '/api/convos/c-not-yours', { token:TE })).status === 404);
+    check('حذف محادثة غيرك لا يؤثر', (await req('DELETE', '/api/convos/c-not-yours', { token:TE })).status === 200);
+
+    /* ---------- 32. حمولة مشوّهة لا تُسقط الخادم، والمرسل يعرف النتيجة ---------- */
+    const sBad = await connect(TE);
+    sBad.emit('chat:message');                          // بلا حمولة
+    sBad.emit('chat:message', 'نص بدل كائن');
+    sBad.emit('chat:message', { to:123, text:{ x:1 } });
+    const ackBad = await new Promise(r => { sBad.emit('chat:message', { to:'admin1', text:'' }, r); setTimeout(() => r(null), 4000); });
+    const ackGood = await new Promise(r => { sBad.emit('chat:message', { to:'admin1', text:'تأكيد استلام' }, r); setTimeout(() => r(null), 4000); });
+    const ackDenied = await new Promise(r => { sBad.emit('chat:message', { to:'no-such-user', text:'مرحبا' }, r); setTimeout(() => r(null), 4000); });
+    sBad.close();
+    check('رسائل مشوّهة لا تُسقط الخادم', (await req('GET', '/api/me', { token:TE })).status === 200);
+    check('الخادم يؤكّد استلام الرسالة للمرسل', ackGood && ackGood.ok === true, JSON.stringify(ackGood));
+    check('الرسالة الفارغة تُرفض مع السبب', ackBad && !!ackBad.error, JSON.stringify(ackBad));
+    check('مراسلة حساب غير مسموح تُرفض مع السبب', ackDenied && /لا يمكنك/.test(ackDenied.error || ''), JSON.stringify(ackDenied));
+
+    /* ---------- 33. إعادة التعيين تمسح كل شيء ---------- */
     await req('POST', '/api/roster/import', { token:A, form:(()=>{ const f=new FormData();
       f.append('file', new Blob([fs.readFileSync(ROSTER)]), 'سجل-اختبار.xlsx'); f.append('mode','replace'); return f; })() });
     await req('POST', '/api/reset', { token:A });

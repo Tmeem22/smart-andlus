@@ -45,13 +45,42 @@ app.use(express.static(path.join(__dirname, '..', 'public'), {
 /* رفع الملفات (يُعرَّف مبكراً لأن عدة مسارات تستخدمه) */
 const storage = multer.diskStorage({
   destination:(req,file,cb)=> cb(null, UPLOAD_DIR),
-  filename:(req,file,cb)=> cb(null, Date.now()+'-'+Math.random().toString(16).slice(2,8)+path.extname(file.originalname||'')),
+  filename:(req,file,cb)=> cb(null, crypto.randomBytes(12).toString('hex')+path.extname(file.originalname||'')),   // رفعان متزامنان لا يتطابق اسماهما
 });
 const upload = multer({ storage, limits:{ fileSize:10*1024*1024 } });
 
+/* معرّف عشوائي آمن. كان الوقت + 3 خانات عشوائية: حسابان في اللحظة نفسها يأخذان المعرّف نفسه
+   (200 دخول متزامن = 5 تكرارات)، فيرى وليّ أمر أبناء عائلة أخرى، ويطغى ملف على محتوى ملف آخر. */
+const newId = prefix => prefix + crypto.randomBytes(9).toString('hex');
+
 /* ---------- المصادقة ---------- */
-function newToken(uid){ const t = crypto.randomBytes(24).toString('hex'); db.DB.tokens[t] = uid; db.saveNow(); return t; }
-function userFromToken(t){ const uid = t && db.DB.tokens[t]; return uid ? db.DB.users.find(u=>u.id===uid) : null; }
+/* الجلسة تنتهي بعد 30 يوماً — وإلا تتراكم الجلسات بلا حد مع كل دخول وتتضخّم القاعدة */
+const SESSION_TTL = 30 * 24 * 3600 * 1000;
+let lastPrune = 0;
+function pruneTokens(){
+  const now = Date.now();
+  if(now - lastPrune < 3600 * 1000) return;
+  lastPrune = now;
+  Object.entries(db.DB.tokenTs).forEach(([t, ts]) => {
+    if(now - ts > SESSION_TTL || !db.DB.tokens[t]){ delete db.DB.tokens[t]; delete db.DB.tokenTs[t]; }
+  });
+}
+function newToken(uid){
+  const t = crypto.randomBytes(24).toString('hex');
+  db.DB.tokens[t] = uid; db.DB.tokenTs[t] = Date.now();
+  pruneTokens();
+  db.saveNow();
+  return t;
+}
+function userFromToken(t){
+  const uid = t && db.DB.tokens[t];
+  if(!uid) return null;
+  if(Date.now() - (db.DB.tokenTs[t] || Date.now()) > SESSION_TTL){
+    delete db.DB.tokens[t]; delete db.DB.tokenTs[t]; saveDB();
+    return null;
+  }
+  return db.DB.users.find(u=>u.id===uid) || null;
+}
 function auth(req,res,next){
   const h = req.headers.authorization || '';
   const t = h.startsWith('Bearer ') ? h.slice(7) : (req.query.t || '');
@@ -77,7 +106,7 @@ function publicUser(u){ const { pass, ...rest } = u; return rest; }
 function pushNotif(uid, text, sub){
   if(!uid || !db.DB.users.some(u=>u.id===uid)) return null;   // لا إشعارات لحساب محذوف
   db.DB.notifs[uid] = db.DB.notifs[uid] || [];
-  const n = { id:'n'+Date.now()+Math.random().toString(16).slice(2,6), text, sub, ts:Date.now(), read:false };
+  const n = { id:newId('n'), text, sub, ts:Date.now(), read:false };
   db.DB.notifs[uid].unshift(n); saveDB();
   io.to('u:'+uid).emit('notif', n);
   return n;
@@ -114,6 +143,27 @@ function repairNames(){
     const v = fixName(db.DB.roster.fileName);
     if(v !== db.DB.roster.fileName){ db.DB.roster.fileName = v; n++; }
   }
+  if(n) db.saveNow();
+  return n;
+}
+/* معرّفات مكرّرة من المولّد القديم: حساب مكرّر تُلغى جلساته ويأخذ معرّفاً جديداً
+   (يسجّل دخوله مجدداً فيصل لحسابه الصحيح عبر هويته)، وملف مكرّر يأخذ معرّفاً جديداً. */
+function repairDuplicateIds(){
+  let n = 0;
+  const seenU = new Set();
+  (db.DB.users || []).forEach(u => {
+    if(!seenU.has(u.id)){ seenU.add(u.id); return; }
+    const old = u.id;
+    Object.entries(db.DB.tokens).forEach(([t, uid]) => { if(uid === old){ delete db.DB.tokens[t]; delete db.DB.tokenTs[t]; } });
+    u.id = newId(u.role === 'parent' ? 'pv' : u.role === 'teacher' ? 't' : 'u');
+    n++;
+  });
+  const seenF = new Set();
+  (db.DB.files || []).forEach(f => {
+    if(!seenF.has(f.id)){ seenF.add(f.id); return; }
+    f.id = newId('f'); f.needsReupload = !!f.blob || f.needsReupload; f.blob = false;   // محتواه ربما طغى عليه ملف آخر
+    n++;
+  });
   if(n) db.saveNow();
   return n;
 }
@@ -203,7 +253,7 @@ app.post('/api/login', (req,res)=>{
       || db.DB.users.find(u => u.role==='parent' && u.idKey && u.idKey.startsWith('parent:'+idType+':')
            && roster.normId(u.idKey.split(':').slice(2).join(':')) === roster.normId(idv));
     if(pu) pu.idKey = key;   // توحيد المفاتيح القديمة
-    if(!pu){ pu = { id:'pv'+Date.now().toString(36)+Math.random().toString(16).slice(2,5), role:'parent',
+    if(!pu){ pu = { id:newId('pv'), role:'parent',
       name: idType==='guardian' ? ('ولي أمر — '+gname) : ('ولي أمر — '+(kids[0].name||'')),
       idKey:key, children:childIds, virtual:true }; db.DB.users.push(pu); }
     else pu.children = childIds;
@@ -307,7 +357,7 @@ function saveConvoTurn(user, convoId, sid, userText, botOut){
   let convo = convoId && list.find(c=>c.id===convoId);
   let isNew = false;
   if(!convo){
-    convo = { id:'c'+Date.now().toString(36)+Math.random().toString(16).slice(2,5),
+    convo = { id:newId('c'),
       sid, title:String(userText).slice(0,32), msgs:[], upd:Date.now() };
     list.unshift(convo); isNew = true;
   }
@@ -512,7 +562,7 @@ app.post('/api/roster/import', auth, requireRole('admin'), upload.single('file')
         dropFileBytes(f); return false;
       });
     }
-    const card = { id:'f'+Date.now(), owner:req.user.id, ownerName:req.user.name, subject:'سجل الطلاب',
+    const card = { id:newId('f'), owner:req.user.id, ownerName:req.user.name, subject:'سجل الطلاب',
       name:origName, origName, status:'approved', mime:req.file.mimetype, path:null, blob:true,
       content:`سجل طلاب مفهرس: ${out.count} طالب — تمت القراءة مرة واحدة عند الاستيراد.`, ts:Date.now() };
     card.size = await keepUpload(card.id, req.file);
@@ -538,7 +588,7 @@ app.post('/api/teachers', auth, requireRole('admin'), (req,res)=>{
   // لا كلمة مرور افتراضية — حساب بكلمة معروفة مسبقاً = باب مفتوح
   if(!pass || String(pass).length < 6)
     return res.status(400).json({ error:'اختر كلمة مرور للمعلم لا تقل عن 6 خانات.' });
-  const t = { id:'t'+Date.now(), role:'teacher', name, user, subject:subject||SUBJECTS[0], nid:nid||'', pass:hashPw(pass), perms:Array.isArray(perms)?perms:['files','messages'] };
+  const t = { id:newId('t'), role:'teacher', name, user, subject:subject||SUBJECTS[0], nid:nid||'', pass:hashPw(pass), perms:Array.isArray(perms)?perms:['files','messages'] };
   db.DB.users.push(t); saveDB(); res.json({ teacher: publicUser(t) });
 });
 app.put('/api/teachers/:id', auth, requireRole('admin'), (req,res)=>{
@@ -593,7 +643,9 @@ app.get('/api/students', auth, requireRole('admin'), (req,res)=>{
 app.post('/api/students', auth, requireRole('admin'), (req,res)=>{
   const b = req.body || {};
   if(!b.name) return res.status(400).json({ error:'اسم الطالب مطلوب' });
-  const s = { id:'s'+Date.now(), name:b.name, grade:b.grade||'', classNo:b.classNo||'', attendance:+b.attendance||95,
+  // الحضور: ما أدخله المدير كما هو — «0» يبقى 0، وغير المُدخل 0 لا رقماً مخترعاً
+  const att = b.attendance === '' || b.attendance == null || !isFinite(+b.attendance) ? 0 : +b.attendance;
+  const s = { id:newId('s'), name:b.name, grade:b.grade||'', classNo:b.classNo||'', attendance:att,
     parent:b.parent||'', grades:b.grades||{}, notes:b.notes||'' };
   db.DB.students.push(s);
   const par = db.DB.users.find(u=>u.id===s.parent);
@@ -667,7 +719,7 @@ app.post('/api/files', auth, requireRole('teacher','admin'), requirePerm('files'
     if(got) content = got;
   }
   const f = {
-    id:'f'+Date.now(), owner:req.user.id, ownerName:req.user.name, subject,
+    id:newId('f'), owner:req.user.id, ownerName:req.user.name, subject,
     name, status: (req.user.role==='admin' && isBrain) ? 'approved' : 'pending',
     mime, path:null, blob:!!req.file, origName:orig || null, content, ts:Date.now(),
     // وليّ الأمر لا يقرأ ملفاً إلا إذا أتاحه المدير له صراحةً (قد يحوي بيانات طلاب آخرين)
@@ -869,28 +921,41 @@ io.on('connection', (socket)=>{
   const uid = socket.user.id;
   socket.join('u:'+uid);
 
-  socket.on('chat:message', ({ to, text })=>{
-    if(!to || !text || !text.trim()) return;
+  // الرد عبر ack: المرسل يعرف أن رسالته حُفظت فعلاً، أو سبب رفضها
+  socket.on('chat:message', (payload, ack)=>{
+    const reply = r => { if(typeof ack === 'function') ack(r); };
+    const fail = msg => { socket.emit('chat:error', msg); reply({ error:msg }); };
+    // حمولة مفقودة أو مشوّهة كانت تُسقط الخادم كله (تفكيك undefined داخل المستمع)
+    const { to, text } = (payload && typeof payload === 'object') ? payload : {};
+    if(typeof to !== 'string' || typeof text !== 'string' || !text.trim()) return fail('رسالة فارغة أو غير صالحة.');
     // نعيد قراءة الحساب في كل رسالة: قد يحذفه المدير أو يسحب صلاحية المراسلة
     const me = db.DB.users.find(u=>u.id===uid);
-    if(!me) return socket.emit('chat:error', 'حسابك لم يعد موجوداً.');
-    if(me.role !== 'admin' && me.role !== 'teacher') return socket.emit('chat:error', 'المراسلة للإدارة والمعلمين فقط.');
-    if(!hasPerm(me, 'messages')) return socket.emit('chat:error', 'صلاحية المراسلة غير مفعّلة لحسابك.');
+    if(!me) return fail('حسابك لم يعد موجوداً.');
+    if(me.role !== 'admin' && me.role !== 'teacher') return fail('المراسلة للإدارة والمعلمين فقط.');
+    if(!hasPerm(me, 'messages')) return fail('صلاحية المراسلة غير مفعّلة لحسابك.');
     const peer = contactsFor(me).find(u=>u.id===to);
-    if(!peer) return socket.emit('chat:error', 'لا يمكنك مراسلة هذا الحساب.');
+    if(!peer) return fail('لا يمكنك مراسلة هذا الحساب.');
     const key = tkey(uid, to);
     db.DB.threads[key] = db.DB.threads[key] || [];
-    const msg = { from:uid, text:String(text).slice(0,2000), ts:Date.now(), read:false };
+    const msg = { from:uid, text:text.slice(0,2000), ts:Date.now(), read:false };
     db.DB.threads[key].push(msg); saveDB();
     io.to('u:'+to).emit('chat:message', { ...msg, peer:uid });
     io.to('u:'+uid).emit('chat:message', { ...msg, peer:to, self:true });
-    pushNotif(to, 'رسالة جديدة من '+me.name, String(text).slice(0,40));
+    pushNotif(to, 'رسالة جديدة من '+me.name, text.slice(0,40));
+    reply({ ok:true, ts:msg.ts });
   });
 });
+
+/* شبكة أمان: خطأ غير متوقّع في طلب واحد لا يُسقط الموقع لكل المستخدمين.
+   (Express 4 لا يلتقط أخطاء المسارات async، وNode يُنهي العملية عند رفض غير معالَج) */
+process.on('unhandledRejection', e => console.error('خطأ غير معالَج:', e && e.stack || e));
+process.on('uncaughtException', e => console.error('استثناء غير ملتقَط:', e && e.stack || e));
 
 (async () => {
   try { await db.init(); }               // Mongo (دائم) أو ملف محلي
   catch(e){ console.error('فشل الاتصال بقاعدة البيانات:', e.message); process.exit(1); }
+  const dupN = repairDuplicateIds();        // حسابات/ملفات بمعرّف مكرّر من المولّد القديم
+  if(dupN) console.log('أُصلح ' + dupN + ' معرّف مكرّر');
   const fixedN = repairNames();            // إصلاح أسماء الملفات العربية المخزَّنة مشوّهة
   const repaired = await repairFiles();    // نصوص إكسل «[object Object]» + ملفات فُقد أصلها
   if(repaired) console.log('فُحص وأُصلح ' + repaired + ' ملف');

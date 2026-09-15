@@ -1211,21 +1211,38 @@ async function openThread(cid){
   const { messages } = await api('/api/thread/'+cid);
   unread[cid] = 0; refreshMsgBadgeLocal();
   document.querySelectorAll('.mgr-item').forEach(b => b.classList.toggle('active', b.dataset.peer===cid));
+  const list = el('mgrList'); if(list) list.classList.remove('show');   // الجوال: اختيار جهة يغلق القائمة
   const chat = el('mgrChat'); if(!chat) return;
-  chat.innerHTML = `<div class="mgr-chat-head"><div class="av" style="width:38px;height:38px;border-radius:11px;background:var(--green);color:#fff;display:grid;place-items:center;font-weight:800">${esc(c.name.replace(/^أ\.\s*/,'')[0])}</div>
+  // الجوال: قائمة جهات الاتصال مخفية لضيق الشاشة — هذا الزر يفتحها (بدونه لا يُراسَل إلا أول جهة)
+  chat.innerHTML = `<div class="mgr-chat-head"><button class="icon-btn mgr-contacts-btn" title="جهات الاتصال" onclick="el('mgrList').classList.add('show')"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M3 6h18M3 12h18M3 18h18"/></svg></button><div class="av" style="width:38px;height:38px;border-radius:11px;background:var(--green);color:#fff;display:grid;place-items:center;font-weight:800">${esc(c.name.replace(/^أ\.\s*/,'')[0])}</div>
       <div><b>${esc(c.name)}</b><div class="small muted">${c.subject?'معلم '+esc(c.subject):'مدير النظام'}</div></div></div>
     <div class="mgr-stream" id="mgrStream">${messages.map(mLine).join('') || '<div class="empty-state small">ابدأ المحادثة 👋</div>'}</div>
     <div class="mgr-composer"><input id="mgrIn" placeholder="اكتب رسالة..." autocomplete="off"><button class="send-btn" style="width:44px;height:44px" onclick="sendMsg('${cid}')">${I.send}</button></div>`;
   const inp = el('mgrIn'); inp.focus(); inp.addEventListener('keydown', e => { if(e.key==='Enter') sendMsg(cid); });
   const st = el('mgrStream'); st.scrollTop = st.scrollHeight;
 }
-function mLine(m){ const mine = m.from===ME.id; return `<div class="m-line ${mine?'mine':''}">${esc(m.text)}<span class="t">${new Date(m.ts).toLocaleTimeString('ar-SA',{hour:'2-digit',minute:'2-digit'})}</span></div>`; }
+function mLine(m){ const mine = m.from===ME.id; return `<div class="m-line ${mine?'mine':''} ${m.pending?'sending':''}" ${m.pending?`data-pending="${m.pending}"`:''}>${esc(m.text)}<span class="t">${new Date(m.ts).toLocaleTimeString('ar-SA',{hour:'2-digit',minute:'2-digit'})}</span></div>`; }
 function appendMgrLine(m){ const st = el('mgrStream'); if(!st) return; st.insertAdjacentHTML('beforeend', mLine(m)); st.scrollTop = st.scrollHeight; }
+/* الرسالة تظهر «قيد الإرسال» حتى يؤكّد الخادم استلامها — وإن رفضها تُعلَّم «لم تُرسل» ويُقال السبب.
+   (كانت تظهر كأنها وصلت حتى لو رفضها الخادم، بلا أي تنبيه) */
 function sendMsg(cid){
   const inp = el('mgrIn'); const t = inp.value.trim(); if(!t) return;
-  socket.emit('chat:message', { to:cid, text:t });
-  appendMgrLine({ from:ME.id, text:t, ts:Date.now() });
+  const pid = 'p' + Date.now().toString(36) + Math.random().toString(16).slice(2, 6);
+  appendMgrLine({ from:ME.id, text:t, ts:Date.now(), pending:pid });
   inp.value = '';
+  let settled = false;
+  const settle = err => {
+    if(settled) return; settled = true;
+    const line = document.querySelector(`[data-pending="${pid}"]`);
+    if(line){ line.classList.remove('sending'); line.removeAttribute('data-pending'); }
+    if(err){
+      if(line){ line.classList.add('failed'); line.title = err; }
+      toast('لم تُرسل الرسالة — ' + err);
+    }
+  };
+  if(!socket || !socket.connected) return settle('لا يوجد اتصال بالخادم، حاول بعد لحظات');
+  socket.emit('chat:message', { to:cid, text:t }, r => settle(r && r.error));
+  setTimeout(() => settle('لم يؤكّد الخادم الاستلام'), 10000);
 }
 function markThreadRead(cid){ api('/api/thread/'+cid).catch(()=>{}); }
 

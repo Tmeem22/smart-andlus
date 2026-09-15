@@ -39,6 +39,7 @@ function seed(){
     notifs: {},    // userId -> [{ id, text, sub, ts, read }]
     convos: {},    // userId -> [{ id, sid, title, msgs:[...], upd }]  (محادثات AI محفوظة)
     tokens: {},    // token -> userId
+    tokenTs: {},   // token -> وقت الإصدار (انتهاء الجلسة بعد 30 يوماً)
   };
 }
 
@@ -114,16 +115,39 @@ function ensureShape(){
   DB.notifs  = DB.notifs  || {};
   DB.convos  = DB.convos  || {};
   DB.tokens  = DB.tokens  || {};
+  DB.tokenTs = DB.tokenTs || {};
+  // جلسات قديمة بلا وقت إصدار: تُحتسب من الآن (لا نُخرج أحداً فجأة)
+  Object.keys(DB.tokens).forEach(t => { if(!DB.tokenTs[t]) DB.tokenTs[t] = Date.now(); });
 }
 
-function persist(){
-  if(coll){ coll.replaceOne({ _id:'db' }, { _id:'db', data:DB }, { upsert:true }).catch(e=>console.error('فشل حفظ Mongo', e.message)); }
-  else { try { fs.writeFileSync(DATA_FILE, JSON.stringify(DB,null,2)); } catch(e){ console.error('فشل الحفظ', e.message); } }
+/* الحفظ: كتابة واحدة في كل لحظة، وما يُطلب أثناءها يُدمج في كتابة تالية واحدة.
+   كانت كل عملية (مثل كل تسجيل دخول) تكتب القاعدة كاملة فوراً وبالتوازي:
+   بطء تحت الضغط، وفي Mongo قد تصل كتابة أقدم بعد أحدث فتمحوها (جلسة تضيع). */
+let writing = false, dirty = false;
+async function persist(){
+  if(writing){ dirty = true; return; }
+  writing = true;
+  try{
+    do{
+      dirty = false;
+      if(coll){
+        await coll.replaceOne({ _id:'db' }, { _id:'db', data:DB }, { upsert:true });
+      } else {
+        // كتابة ذرّية: ملف مؤقت ثم إعادة تسمية — انقطاع أثناء الكتابة لا يُتلف البيانات
+        const tmp = DATA_FILE + '.tmp';
+        await fs.promises.writeFile(tmp, JSON.stringify(DB));
+        await fs.promises.rename(tmp, DATA_FILE);
+      }
+    } while(dirty);
+  }catch(e){
+    console.error('فشل الحفظ:', e.message);
+    dirty = false;
+  }finally{ writing = false; }
 }
 let saveTimer = null;
 function saveDB(){ clearTimeout(saveTimer); saveTimer = setTimeout(persist, 150); }   // كتابة مؤجّلة
-function saveNow(){ persist(); }
-function resetDB(){ DB = seed(); saveNow(); return DB; }
+function saveNow(){ clearTimeout(saveTimer); return persist(); }
+function resetDB(){ DB = seed(); ensureShape(); saveNow(); return DB; }   // ensureShape: لا حقل ناقص بعد إعادة التعيين
 
 module.exports = { get DB(){ return DB; }, init, saveDB, saveNow, resetDB, hashPw, verifyPw, SUBJECTS, PERMS,
   putBlob, getBlob, delBlob };

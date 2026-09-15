@@ -7,3 +7,4 @@ public/uploads/*
 npm-debug.log*
 .DS_Store
 server/blobs/
+server/data.json.tmp
